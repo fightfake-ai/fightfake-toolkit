@@ -32,6 +32,13 @@ Demonstrate the industry integration pattern:
   - capture assertion emitter.
 - Optional OP-TEE path if using platform with full TrustZone userspace TA toolchain.
 
+Current repository status:
+
+- Level 0 C2PA embedding commands exist (`sign-capture-manifest`, `sign-edit-manifest`).
+- Level 0 verifier command exists (`verify-level0-bundle`).
+- First Pi capture interface contract exists in `src/pi_capture.rs` and is printable with
+  `print-pi-capture-contract`.
+
 ## Data path (Level 1)
 
 1. Camera ISP outputs YUV420 frames.
@@ -65,6 +72,7 @@ Demonstrate the industry integration pattern:
 - CLI capture tool (`capture-pi`) that records 10s YUV clips.
 - Deterministic macroblock tiling unit tests.
 - Throughput benchmark at 1080p30.
+- Implement `PiFrameSource` using `libcamera` callback plumbing.
 
 Deliverable: reproducible macroblock stream + baseline FPS metrics.
 
@@ -75,6 +83,7 @@ Deliverable: reproducible macroblock stream + baseline FPS metrics.
   - file-based dev key provider,
   - secure element provider.
 - Emit `org.zkedit.capture.v1` JSON payload.
+- Connect output directly to `sign-capture-manifest`.
 
 Deliverable: capture session outputs `h1`, signature, and payload file.
 
@@ -85,6 +94,7 @@ Deliverable: capture session outputs `h1`, signature, and payload file.
   - produce proof bytes,
   - emit `org.zkedit.edit_proof.v1`.
 - Connect to this repository's CLI.
+- Automate `verify-level0-bundle` in CI for sample assets.
 
 Deliverable: capture payload + edit-proof payload pair for one sample clip.
 
@@ -124,3 +134,4 @@ Those are Level 2 concerns (dedicated silicon tap/hash block).
 - Benchmark sheet:
   - CPU %, memory, power draw at 720p/1080p.
 - Threat model table distinguishing Level 0/1/2 guarantees.
+- Frame callback contract document generated from `PiFrameSource` API.
