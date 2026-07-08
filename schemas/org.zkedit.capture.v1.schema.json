@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fightfake.ai/schemas/org.zkedit.capture.v1.schema.json",
+  "title": "org.zkedit.capture.v1",
+  "type": "object",
+  "required": [
+    "assertion_type",
+    "version",
+    "hash_algorithm",
+    "pipeline_stage",
+    "device_id",
+    "h1"
+  ],
+  "properties": {
+    "assertion_type": {
+      "const": "org.zkedit.capture.v1"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "hash_algorithm": {
+      "type": "string",
+      "enum": ["griffin"]
+    },
+    "pipeline_stage": {
+      "type": "string",
+      "enum": ["post_isp", "pre_encode", "decoded_reingest"]
+    },
+    "device_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "h1": {
+      "type": "string",
+      "pattern": "^0x[0-9a-fA-F]+$"
+    }
+  },
+  "additionalProperties": false
+}

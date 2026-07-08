@@ -1,0 +1,19 @@
+[package]
+name = "fightfake-proof-prototype"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+eva-backend = ["dep:video"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+video = { git = "https://github.com/miha-stopar/eva", package = "video", rev = "a559ac8a05643c5edbbc169605a1fe3eca5908b0", optional = true }
+
+[workspace]

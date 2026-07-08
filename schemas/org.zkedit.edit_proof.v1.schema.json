@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fightfake.ai/schemas/org.zkedit.edit_proof.v1.schema.json",
+  "title": "org.zkedit.edit_proof.v1",
+  "type": "object",
+  "required": [
+    "assertion_type",
+    "version",
+    "proof_system",
+    "circuit_variant",
+    "gadget_id",
+    "h1",
+    "h2",
+    "proof_sha256",
+    "proof_size_bytes"
+  ],
+  "properties": {
+    "assertion_type": {
+      "const": "org.zkedit.edit_proof.v1"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "proof_system": {
+      "type": "string",
+      "enum": ["nova-groth16"]
+    },
+    "circuit_variant": {
+      "type": "string",
+      "enum": ["edit_only", "edit_encode"]
+    },
+    "gadget_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "h1": {
+      "type": "string",
+      "pattern": "^0x[0-9a-fA-F]+$"
+    },
+    "h2": {
+      "type": "string",
+      "pattern": "^0x[0-9a-fA-F]+$"
+    },
+    "proof_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{64}$"
+    },
+    "proof_size_bytes": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "additionalProperties": false
+}
