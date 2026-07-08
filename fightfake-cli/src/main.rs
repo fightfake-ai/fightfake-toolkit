@@ -1,4 +1,5 @@
 mod c2pa_signer;
+mod cert_gen;
 mod demo;
 mod ffmpeg;
 mod pi_capture;
@@ -14,6 +15,7 @@ use fightfake_core::assertions::{
 use sha2::{Digest, Sha256};
 
 use c2pa_signer::{sign_capture_asset, sign_edit_asset, SignMaterial};
+use cert_gen::generate_test_cert;
 use demo::{run_level0_demo, Level0DemoConfig};
 use fightfake_core::verify::{verify_bundle, verify_signed_assets};
 use pi_capture::LibcameraContract;
@@ -166,6 +168,16 @@ enum Command {
         edit_schema: PathBuf,
     },
 
+    /// Generate a self-signed P-256 test certificate (ES256, required by C2PA).
+    ///
+    /// Writes signer-cert.pem and signer-key.pem to the given directory.
+    /// For local testing only — not suitable for production.
+    MakeTestCert {
+        /// Directory to write the certificate and key into.
+        #[arg(long, default_value = "testdata/certs")]
+        out_dir: PathBuf,
+    },
+
     /// Print the Level 1 Raspberry Pi libcamera adapter contract.
     PrintPiCaptureContract,
 
@@ -201,6 +213,8 @@ enum Command {
 #[derive(Debug, Clone, ValueEnum)]
 enum GadgetArg {
     Brightness,
+    Grayscale,
+    Invert,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -221,6 +235,8 @@ fn main() -> Result<()> {
         } => {
             let gadget = match gadget {
                 GadgetArg::Brightness => Gadget::Brightness { scale: gadget_param },
+                GadgetArg::Grayscale  => Gadget::Grayscale,
+                GadgetArg::Invert     => Gadget::Invert,
             };
             let out = run_prove_edit(&ProveEditConfig {
                 input,
@@ -348,6 +364,10 @@ fn main() -> Result<()> {
                 &edit_schema,
             )?;
             println!("ok");
+        }
+
+        Command::MakeTestCert { out_dir } => {
+            generate_test_cert(&out_dir)?;
         }
 
         Command::PrintPiCaptureContract => {

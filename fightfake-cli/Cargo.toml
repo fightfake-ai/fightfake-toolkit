@@ -57,3 +57,5 @@ rayon    = { version = "1.7", optional = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Used for ffmpeg subprocess calls (native only)
 which = "6"
+# Used for `make-test-cert` command
+rcgen = "0.12"
