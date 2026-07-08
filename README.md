@@ -1,171 +1,190 @@
-# FightFake Proof Prototype (Level 0 + Level 1 plan)
+# fightfake-toolkit
 
-This repository is a starter scaffold for `fightfake-ai` focused on:
+A ZK-proved video editing toolkit with C2PA content provenance.
 
-1. **Level 0 prototype** you can run today (software-only provenance flow).
-2. **Level 1 Raspberry Pi demonstrator plan** with realistic implementation details.
+Given an input video and an edit operation, **fightfake-toolkit**:
 
-It is intentionally **scheme-neutral** at the assertion layer so you are not tied to Eva naming.
+1. Applies the edit (brightness, crop, …)
+2. Generates a zero-knowledge proof that the edit was applied exactly as declared — without revealing the original frames
+3. Embeds the proof and both hash-chain endpoints in a C2PA manifest, creating a tamper-evident provenance chain
 
-## License note
+The toolkit is scheme-neutral: the Eva proving backend is an optional dependency.  Without it, the workflow runs in Level-0 mode (real edits, real hashes, placeholder proof) that is enough for prototyping and UI integration.
 
-Eva is MIT licensed, so building a separate repository that depends on Eva components is generally fine.
-Keep license notices for bundled code and dependencies.
-
-## Neutral assertion namespace
-
-Current draft assertion names in this prototype:
-
-- `org.zkedit.capture.v1`
-- `org.zkedit.edit_proof.v1`
-
-If you prefer a different namespace later, update `schemas/` and `src/assertions.rs`.
+---
 
 ## Repository layout
 
-- `schemas/`: JSON schema drafts for custom C2PA assertions.
-- `src/`: Rust CLI for payload emission, C2PA embedding, verification checks, and Pi interface contract.
-- `docs/level1-pi-demonstrator.md`: concrete Level 1 hardware/software plan.
-- `docs/level0-end-to-end.md`: command-by-command Level 0 flow.
+```
+fightfake-toolkit/
+├── fightfake-core/       shared library — assertions, schemas, verifier
+│                         (no heavy deps; compiles to native + WASM)
+├── fightfake-cli/        full-workflow CLI binary `fightfake`
+├── fightfake-wasm/       browser verifier (wasm-bindgen; for fightfake.ai)
+├── schemas/              org.zkedit.* JSON Schemas
+├── testdata/             test videos, certs, proof stubs
+└── docs/                 detailed documentation
+```
 
-## Level 0 goal
-
-Produce a reproducible manifest pair:
-
-1. Capture-side assertion payload (`org.zkedit.capture.v1`) with `h1`.
-2. Edit-side assertion payload (`org.zkedit.edit_proof.v1`) with:
-   - `h1` (input chain root),
-   - `h2` (output chain root),
-   - proof bytes metadata,
-   - circuit variant metadata.
-
-This repository now includes:
-
-- assertion payload emitters,
-- C2PA signing commands using `c2pa-rs`,
-- a verifier command for schema + proof linkage checks,
-- and a first Pi/libcamera adapter contract interface.
-
-## Eva backend strategy
-
-The prototype treats Eva as a backend dependency:
-
-- Default build: schema/payload tools only.
-- `eva-backend` feature: enable direct linking to Eva crates for native hash/proof generation integration.
-
-This keeps your public interface stable even if you swap proving backends later.
+---
 
 ## Quick start
 
-```bash
-cd /Users/miha/projects/fightfake-projects/fightfake-proof-prototype
-cargo run -- emit-capture --device-id "pi-cam-01" --pipeline-stage post_isp --h1 0x1234
+### Prerequisites
 
-cargo run -- emit-edit-proof \
-  --proof-system nova-groth16 \
-  --circuit-variant edit_only \
-  --gadget-id brightness \
-  --h1 0x1234 \
-  --h2 0x9876 \
-  --proof-path ./proof.bin
+```bash
+brew install ffmpeg      # macOS
+apt install ffmpeg       # Linux
+cargo install wasm-pack  # for WASM build only
 ```
+
+### Level 0 — real edit, stub proof
+
+```bash
+# Build (fast; no heavy crypto)
+cargo build -p fightfake-cli --release
+
+# Run the full workflow
+./target/release/fightfake prove-edit \
+  --input testdata/videos/input/capture.mp4 \
+  --gadget brightness \
+  --gadget-param 416 \
+  --out-dir out/ \
+  --cert testdata/certs/signer-cert.pem \
+  --key  testdata/certs/signer-key.pem
+
+# Verify
+./target/release/fightfake verify \
+  --capture out/capture.signed.mp4 \
+  --edited  out/edited.signed.mp4 \
+  --proof   out/proof.bin
+```
+
+The `out/` directory will contain:
+
+| File | Description |
+|---|---|
+| `edited.mp4` | Re-encoded edited video |
+| `proof.bin` | ZK proof (stub in Level 0; real in Level 1+) |
+| `capture.assertion.json` | `org.zkedit.capture.v1` payload |
+| `edit.assertion.json` | `org.zkedit.edit_proof.v1` payload |
+| `capture.signed.mp4` | Original + C2PA capture manifest |
+| `edited.signed.mp4` | Edited + C2PA edit-proof manifest + capture ingredient |
+
+### Level 1 — real Nova IVC + Groth16 proof
+
+```bash
+# Build with Eva backend (first build: 10–20 min)
+cargo build -p fightfake-cli --release --features eva-backend
+
+./target/release/fightfake prove-edit \
+  --input  capture.mp4 \
+  --gadget brightness \
+  --out-dir out/
+```
+
+Proving time depends on video length and `--blocks-per-step`.  A 10-second 352×288 clip takes ~5 min on an M2 Mac.
+
+---
 
 ## Commands
 
-### 1) Emit capture assertion JSON
+### `prove-edit` — the main workflow
 
-```bash
-cargo run -- emit-capture \
-  --device-id "pi-cam-01" \
-  --pipeline-stage post_isp \
-  --h1 0x1234 \
-  --out ./capture.assertion.json
+```
+fightfake prove-edit [OPTIONS] --input <FILE>
+
+Options:
+  -i, --input <FILE>           Input video (MP4 or any ffmpeg-decodeable format)
+      --gadget <GADGET>        Edit operation [brightness] [default: brightness]
+      --gadget-param <N>       Gadget parameter (brightness: luma scale × 1/1024) [default: 416]
+  -o, --out-dir <DIR>         Output directory [default: out]
+      --cert <FILE>            PEM signer certificate [default: testdata/certs/signer-cert.pem]
+      --key  <FILE>            PEM signer private key  [default: testdata/certs/signer-key.pem]
+      --device-id <ID>         Opaque device ID in capture assertion [default: dev-0]
+      --blocks-per-step <N>    Macroblocks per Nova step [default: 256]
 ```
 
-### 2) Emit edit-proof assertion JSON
+### `verify` — check a signed asset pair
 
-```bash
-cargo run -- emit-edit-proof \
-  --proof-system nova-groth16 \
-  --circuit-variant edit_only \
-  --gadget-id brightness \
-  --h1 0x1234 \
-  --h2 0x9876 \
-  --proof-path ./proof.bin \
-  --out ./edit.assertion.json
+```
+fightfake verify --capture <FILE> --edited <FILE> --proof <FILE>
 ```
 
-### 3) Sign capture asset with C2PA (`org.zkedit.capture.v1`)
+Reads `org.zkedit.*` assertions directly from the C2PA manifests and checks:
+- h1 is identical in capture and edit assertions
+- proof SHA-256 matches the proof binary
+- C2PA hard binding (container hash) is intact
+
+### Low-level plumbing commands
+
+| Command | Purpose |
+|---|---|
+| `emit-capture` | Emit a `org.zkedit.capture.v1` JSON (without signing) |
+| `emit-edit-proof` | Emit a `org.zkedit.edit_proof.v1` JSON |
+| `sign-capture-manifest` | Sign a source video and embed a capture assertion |
+| `sign-edit-manifest` | Sign an edited video with an edit-proof assertion + parent ingredient |
+| `verify-bundle` | Schema + linkage check against assertion JSON side-files |
+| `run-level0-demo` | Legacy Level-0 demo (pre-computed h1/h2, any proof blob) |
+| `print-pi-capture-contract` | Print the Raspberry Pi libcamera adapter contract |
+
+---
+
+## WASM — browser verifier
 
 ```bash
-cargo run -- sign-capture-manifest \
-  --source-asset ./capture.mp4 \
-  --dest-asset ./capture.signed.mp4 \
-  --capture-assertion ./capture.assertion.json \
-  --cert-pem ./certs/signer-cert.pem \
-  --key-pem ./certs/signer-key.pem
+wasm-pack build fightfake-wasm --target web --release
 ```
 
-### 4) Sign edited asset with C2PA (`org.zkedit.edit_proof.v1` + ingredient)
+The output (`fightfake-wasm/pkg/`) exports:
 
-```bash
-cargo run -- sign-edit-manifest \
-  --source-asset ./edited.mp4 \
-  --dest-asset ./edited.signed.mp4 \
-  --parent-capture-asset ./capture.signed.mp4 \
-  --edit-assertion ./edit.assertion.json \
-  --cert-pem ./certs/signer-cert.pem \
-  --key-pem ./certs/signer-key.pem
+```js
+import init, { verifyAssertionLinkage } from './fightfake_wasm.js';
+await init();
+
+const result = verifyAssertionLinkage(captureJson, editJson, proofBytes);
+console.log(result.h1_matches, result.proof_sha_matches);
 ```
 
-### 5) Verify Level 0 bundle consistency
+Cryptographic Groth16 verification in the browser is on the roadmap (`verifyGroth16Proof` returns `false` until integrated).
 
-This verifies:
-- both assertions validate against schemas,
-- `capture.h1 == edit.h1`,
-- `sha256(proof.bin)` matches `proof_sha256`,
-- proof size matches `proof_size_bytes`.
+---
 
-```bash
-cargo run -- verify-level0-bundle \
-  --capture-assertion ./capture.assertion.json \
-  --edit-assertion ./edit.assertion.json \
-  --proof-path ./proof.bin
-```
+## Assertion namespace
 
-### 6) Print first Pi/libcamera callback contract
+All assertions use the `org.zkedit.*` namespace to remain scheme-neutral:
 
-```bash
-cargo run -- print-pi-capture-contract
-```
+| Label | Description |
+|---|---|
+| `org.zkedit.capture.v1` | Device ID, pipeline stage, h1 (Griffin hash over original macroblocks) |
+| `org.zkedit.edit_proof.v1` | Gadget, h1, h2, proof SHA-256, proof system metadata |
 
-## C2PA integration notes
+JSON Schemas are in `schemas/`.
 
-- Signing commands use `c2pa-rs` directly (`Builder`, `add_assertion`, `sign_file`).
-- Capture signing embeds `org.zkedit.capture.v1`.
-- Edit signing embeds `org.zkedit.edit_proof.v1` and adds the capture asset as ingredient.
-- This is a pragmatic Level 0 implementation. Asserting strict cross-manifest h1 equality inside C2PA
-  policy itself remains custom verifier logic (implemented in `verify-level0-bundle`).
+---
 
-## Pi adapter interface (first version)
+## Proof levels
 
-The `print-pi-capture-contract` command prints the contract that a `libcamera` adapter must satisfy:
+| Level | What is real | What is simulated |
+|---|---|---|
+| **0** | Edit, hashes (SHA-256), C2PA manifests | ZK proof (32-byte stub) |
+| **1** | Edit, Griffin hashes, Nova IVC + Groth16 proof, C2PA | Ingest chain (trust ffmpeg decode) |
+| **2** | + TEE-computed Griffin hash at capture | Trust TEE implementation |
+| **3** | + Camera ISP → hash engine hardware bus | Full hardware trust |
 
-- produce contiguous YUV420 frame buffers,
-- attach frame metadata (timestamp, dimensions, pixel format, frame index),
-- feed every frame to a consumer callback with bounded latency.
+Build `--features eva-backend` to reach Level 1.
 
-The interface traits are defined in `src/pi_capture.rs`:
+---
 
-- `PiFrameSource`: source abstraction (`start`, `pump`, `stop`),
-- `FrameConsumer`: per-frame callback endpoint.
+## Roadmap
 
-## Next implementation tasks
+- [ ] Crop, grayscale, invert gadgets in `prove-edit`
+- [ ] `verify-proof` command (cryptographic Groth16 check in CLI)
+- [ ] WASM Groth16 verifier (`verifyGroth16Proof`)
+- [ ] Level 1 Raspberry Pi demonstrator (see `docs/level1-pi-demonstrator.md`)
+- [ ] Proof serialization format and public key distribution spec
 
-1. Add real `libcamera` implementation behind `PiFrameSource`.
-2. Add signer backends:
-   - file key (dev),
-   - secure element (ATECC608),
-   - TEE callback signer.
-3. Add C2PA verifier command reading manifests and extracting custom assertions.
+---
 
+## License
+
+MIT

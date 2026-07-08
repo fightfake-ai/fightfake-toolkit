@@ -1,22 +1,20 @@
-[package]
-name = "fightfake-proof-prototype"
-version = "0.1.0"
-edition = "2021"
-
-[features]
-default = []
-eva-backend = ["dep:video"]
-
-[dependencies]
-anyhow = "1"
-c2pa = { version = "0.53", features = ["file_io"] }
-clap = { version = "4", features = ["derive"] }
-hex = "0.4"
-jsonschema = "0.18"
-mime_guess = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.10"
-video = { git = "https://github.com/miha-stopar/eva", package = "video", rev = "a559ac8a05643c5edbbc169605a1fe3eca5908b0", optional = true }
-
 [workspace]
+members = ["fightfake-core", "fightfake-cli", "fightfake-wasm"]
+resolver = "2"
+
+# Eva's video crate depends on patched versions of these arkworks crates.
+# The same patches must be declared at the workspace level so Cargo resolves
+# them identically here and inside the video Git dependency.
+[patch.crates-io]
+ark-groth16  = { git = "https://github.com/winderica/groth16", branch = "experimental" }
+ark-relations = { git = "https://github.com/winderica/snark",  branch = "experimental" }
+ark-r1cs-std  = { git = "https://github.com/winderica/r1cs-std", branch = "experimental" }
+
+[profile.release]
+opt-level   = 3
+lto         = "thin"
+incremental = true
+panic       = "abort"
+
+[profile.test]
+opt-level = 3
