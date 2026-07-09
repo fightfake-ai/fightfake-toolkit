@@ -37,7 +37,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use fightfake_core::assertions::{
     CaptureAssertionV1, EditProofAssertionV1, CAPTURE_ASSERTION_TYPE, EDIT_PROOF_ASSERTION_TYPE,
 };
@@ -113,18 +113,24 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
     let wall = std::time::Instant::now();
 
     // 1. Probe video dimensions.
-    let (width, height, fps_num, fps_den, num_frames) = probe_video(&cfg.input)?;
+    let (orig_w, orig_h, fps_num, fps_den, num_frames) = probe_video(&cfg.input)?;
     println!(
-        "[workflow] input: {}×{} @ {fps_num}/{fps_den} fps, {num_frames} frames",
-        width, height
+        "[workflow] input: {orig_w}×{orig_h} @ {fps_num}/{fps_den} fps, {num_frames} frames"
     );
 
-    if width % 16 != 0 || height % 16 != 0 {
-        bail!(
-            "video dimensions {width}×{height} are not multiples of 16. \
-             Re-scale with ffmpeg first: -vf scale={}:{}",
-            (width / 16) * 16,
-            (height / 16) * 16
+    // Eva's IVC circuit works on 16×16 macroblocks — both dimensions must be
+    // multiples of 16.  Automatically crop to the largest aligned size.
+    // This removes at most 15 pixels from the bottom and right edges only; no
+    // pixel values are resampled.
+    let width  = (orig_w / 16) * 16;
+    let height = (orig_h / 16) * 16;
+    if width != orig_w || height != orig_h {
+        println!(
+            "[workflow] note: cropping {orig_w}×{orig_h} → {width}×{height} \
+             ({} col(s) and {} row(s) removed from the bottom-right edge; \
+             Eva requires multiples of 16)",
+            orig_w - width,
+            orig_h - height,
         );
     }
 

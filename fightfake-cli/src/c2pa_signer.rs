@@ -4,8 +4,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use c2pa::{create_signer, Builder, SigningAlg};
 use fightfake_core::assertions::{
-    read_capture_assertion, read_edit_proof_assertion, CAPTURE_ASSERTION_TYPE,
-    EDIT_PROOF_ASSERTION_TYPE,
+    read_capture_assertion, read_edit_proof_assertion, CAPTURE_ASSERTION_LABEL,
+    EDIT_PROOF_ASSERTION_LABEL,
 };
 use serde_json::json;
 
@@ -27,10 +27,11 @@ pub fn sign_capture_asset(
     .context("failed to initialize capture C2PA builder")?;
 
     builder
-        .add_assertion(CAPTURE_ASSERTION_TYPE, &capture)
-        .context("failed to add org.zkedit.capture.v1")?;
+        .add_assertion(CAPTURE_ASSERTION_LABEL, &capture)
+        .context("failed to add org.zkedit.capture")?;
 
     let signer = make_signer(signer)?;
+    remove_if_exists(dest_asset)?;
     builder
         .sign_file(&*signer, source_asset, dest_asset)
         .with_context(|| {
@@ -104,8 +105,8 @@ pub fn sign_edit_asset(
 
     // org.zkedit.edit_proof.v1 — our ZK proof assertion.
     builder
-        .add_assertion(EDIT_PROOF_ASSERTION_TYPE, &edit)
-        .context("failed to add org.zkedit.edit_proof.v1")?;
+        .add_assertion(EDIT_PROOF_ASSERTION_LABEL, &edit)
+        .context("failed to add org.zkedit.edit_proof")?;
 
     let signer = make_signer(signer)?;
     builder
@@ -180,6 +181,7 @@ pub fn sign_plain_c2pa(
         .context("failed to add c2pa.actions")?;
 
     let signer = make_signer(signer)?;
+    remove_if_exists(dest_asset)?;
     builder
         .sign_file(&*signer, source_asset, dest_asset)
         .with_context(|| {
@@ -189,6 +191,16 @@ pub fn sign_plain_c2pa(
                 dest_asset.display()
             )
         })?;
+    Ok(())
+}
+
+/// Remove `path` if it already exists so `sign_file` can write it fresh.
+/// c2pa-rs refuses to overwrite an existing file.
+fn remove_if_exists(path: &Path) -> Result<()> {
+    if path.exists() {
+        std::fs::remove_file(path)
+            .with_context(|| format!("failed to remove existing file {}", path.display()))?;
+    }
     Ok(())
 }
 

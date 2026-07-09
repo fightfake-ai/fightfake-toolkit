@@ -91,20 +91,22 @@ fn parse_fraction(s: &str) -> Option<(u64, u64)> {
 
 // ── Decode ────────────────────────────────────────────────────────────────────
 
-/// Decode `input` video to raw planar YUV 4:2:0.
+/// Decode `input` video to raw planar YUV 4:2:0, cropping to `(width, height)`.
 ///
-/// Width × height must be multiples of 16 (Eva constraint).
+/// Uses `crop=w:h:0:0` so no pixels are resampled — only the bottom/right edge
+/// is trimmed when the source dimensions are not multiples of 16.
 pub fn ffmpeg_decode_to_yuv(
     input: &Path,
     output_yuv: &Path,
     width: usize,
     height: usize,
 ) -> Result<()> {
+    let vf = format!("crop={width}:{height}:0:0");
     let status = Command::new("ffmpeg")
         .args([
             "-y",
             "-i", input.to_str().unwrap_or(""),
-            "-vf", &format!("scale={width}:{height}"),
+            "-vf", &vf,
             "-pix_fmt", "yuv420p",
             "-f", "rawvideo",
             output_yuv.to_str().unwrap_or(""),

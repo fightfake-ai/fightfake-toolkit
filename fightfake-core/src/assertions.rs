@@ -3,6 +3,13 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// C2PA manifest assertion label (what c2pa-rs stores and looks up).
+/// c2pa-rs strips the default `.v1` suffix per the C2PA spec, so the label
+/// is `org.zkedit.capture`, not `org.zkedit.capture.v1`.
+pub const CAPTURE_ASSERTION_LABEL: &str = "org.zkedit.capture";
+pub const EDIT_PROOF_ASSERTION_LABEL: &str = "org.zkedit.edit_proof";
+
+/// Human-readable type string embedded inside the JSON payload (NOT the manifest label).
 pub const CAPTURE_ASSERTION_TYPE: &str = "org.zkedit.capture.v1";
 pub const EDIT_PROOF_ASSERTION_TYPE: &str = "org.zkedit.edit_proof.v1";
 

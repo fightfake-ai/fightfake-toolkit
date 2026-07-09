@@ -17,7 +17,8 @@ use sha2::{Digest, Sha256};
 
 use crate::assertions::{
     read_capture_assertion, read_edit_proof_assertion, CaptureAssertionV1, EditProofAssertionV1,
-    CAPTURE_ASSERTION_TYPE, EDIT_PROOF_ASSERTION_TYPE,
+    CAPTURE_ASSERTION_LABEL, CAPTURE_ASSERTION_TYPE, EDIT_PROOF_ASSERTION_LABEL,
+    EDIT_PROOF_ASSERTION_TYPE,
 };
 use crate::schema_utils::validate_json_against_schema;
 
@@ -68,8 +69,8 @@ pub fn verify_capture_asset(asset_path: &Path) -> Result<CaptureAssertionV1> {
         .ok_or_else(|| anyhow::anyhow!("no active manifest in {}", asset_path.display()))?;
 
     let assertion: CaptureAssertionV1 =
-        find_assertion(manifest.assertions(), CAPTURE_ASSERTION_TYPE)
-            .context("asset is missing org.zkedit.capture.v1 — not a fightfake-signed capture")?;
+        find_assertion(manifest.assertions(), CAPTURE_ASSERTION_LABEL)
+            .context("asset is missing org.zkedit.capture — not a fightfake-signed capture")?;
 
     Ok(assertion)
 }
@@ -94,11 +95,11 @@ pub fn verify_signed_assets(
         .ok_or_else(|| anyhow::anyhow!("no active manifest in edited asset"))?;
 
     let capture_assertion: CaptureAssertionV1 =
-        find_assertion(capture_manifest.assertions(), CAPTURE_ASSERTION_TYPE)
-            .context("capture asset missing org.zkedit.capture.v1")?;
+        find_assertion(capture_manifest.assertions(), CAPTURE_ASSERTION_LABEL)
+            .context("capture asset missing org.zkedit.capture")?;
     let edit_assertion: EditProofAssertionV1 =
-        find_assertion(edited_manifest.assertions(), EDIT_PROOF_ASSERTION_TYPE)
-            .context("edited asset missing org.zkedit.edit_proof.v1")?;
+        find_assertion(edited_manifest.assertions(), EDIT_PROOF_ASSERTION_LABEL)
+            .context("edited asset missing org.zkedit.edit_proof")?;
 
     check_h1_linkage(&capture_assertion.h1, &edit_assertion.h1)?;
     check_proof_integrity(proof_path, &edit_assertion.proof_sha256, edit_assertion.proof_size_bytes)?;

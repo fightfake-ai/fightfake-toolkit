@@ -7,7 +7,10 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use rcgen::{Certificate, CertificateParams, DistinguishedName, DnType};
+use rcgen::{
+    Certificate, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose,
+    KeyUsagePurpose,
+};
 
 /// Generate a self-signed P-256 cert and write PEM files.
 ///
@@ -25,13 +28,22 @@ pub fn generate_test_cert(out_dir: &Path) -> Result<()> {
     dn.push(DnType::OrganizationName, "fightfake-toolkit");
     params.distinguished_name = dn;
 
-    // Subject Alternative Name (required by c2pa-rs).
+    // Subject Alternative Name (some C2PA verifiers check for its presence).
     params.subject_alt_names = vec![rcgen::SanType::DnsName(
         "fightfake.example.com".to_owned(),
     )];
 
     // Use ECDSA P-256 — the only algorithm accepted by the c2pa-rs ES256 signer.
     params.alg = &rcgen::PKCS_ECDSA_P256_SHA256;
+
+    // c2pa-rs certificate profile check (§14.5.1) requires all three of these:
+    // 1. KeyUsage must include digitalSignature.
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    // 2. ExtendedKeyUsage must include emailProtection (OID 1.3.6.1.5.5.7.3.4).
+    //    c2pa-rs allows emailProtection, timeStamping, or ocspSigning.
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::EmailProtection];
+    // 3. AuthorityKeyIdentifier must be present (off by default in rcgen).
+    params.use_authority_key_identifier_extension = true;
 
     let cert = Certificate::from_params(params)
         .context("failed to generate certificate")?;
