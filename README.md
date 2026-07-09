@@ -99,8 +99,17 @@ C2PA manifests must be signed with a certificate.  For testing:
 # writes testdata/certs/signer-cert.pem and testdata/certs/signer-key.pem
 ```
 
+> **What the certificate does:** every C2PA manifest must carry a COSE_Sign1 digital
+> signature that answers *"who signed this, and are they trustworthy?"*  The private key
+> produces the signature; the certificate embeds your public key and identity inside the
+> manifest so anyone can verify it without contacting you.  The signature covers *every*
+> assertion in the manifest and every byte of the video file — changing a single pixel after
+> signing breaks it.
+>
 > For production, use a certificate from a CA on the
-> [C2PA trust list](https://creator-assertions.github.io/taf/).
+> [C2PA trust list](https://creator-assertions.github.io/taf/) (currently: Adobe, Truepic,
+> Leica, and others).  Swapping in a real cert requires no code changes — just pass different
+> `--cert` and `--key` files.
 
 ### Step 2 — prove an edit
 
@@ -191,6 +200,24 @@ if (result.h1_matches && result.proof_sha_matches) {
 What the browser checks today: h1 consistency between the two assertions and SHA-256 of the
 proof binary.  Cryptographic Groth16 verification (three pairing checks over BN254) is on the
 roadmap for a future WASM release.
+
+### C2PA online validator
+
+The manifests produced by this toolkit are spec-conformant and can be uploaded to
+[verify.contentauthenticity.org](https://verify.contentauthenticity.org):
+
+| Check | Self-signed cert | Production cert |
+|---|---|---|
+| Manifest structure | ✅ pass | ✅ pass |
+| COSE_Sign1 signature | ✅ pass | ✅ pass |
+| Hard binding (`c2pa.hash.bmff.v3`) | ✅ pass | ✅ pass |
+| Ingredient chain (capture → edit) | ✅ pass | ✅ pass |
+| `c2pa.actions` edit description | ✅ present | ✅ present |
+| Certificate trust | ⚠️ warning (not on trust list) | ✅ pass |
+| `org.zkedit.*` assertions | ℹ️ shown as custom | ℹ️ shown as custom |
+
+The "custom assertion" label is expected — C2PA viewers display any assertion whose label
+they don't recognise as a custom extension, without treating it as an error.
 
 ---
 

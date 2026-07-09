@@ -59,6 +59,7 @@ pub fn sign_edit_asset(
         Builder::from_json(&json!({ "title": "FightFake edit proof" }).to_string())
             .context("failed to initialize edit C2PA builder")?;
 
+    // Ingredient: link back to the signed capture asset.
     let mut parent_file = File::open(parent_capture_asset).with_context(|| {
         format!(
             "failed to open parent capture asset {}",
@@ -81,6 +82,27 @@ pub fn sign_edit_asset(
         )
         .context("failed to add capture ingredient")?;
 
+    // c2pa.actions — required by standard C2PA verifiers and viewers.
+    // Maps fightfake gadget IDs to the nearest standard C2PA action code.
+    let c2pa_action = gadget_to_c2pa_action(&edit.gadget_id);
+    let description = gadget_description(&edit.gadget_id);
+    let actions_assertion = json!({
+        "actions": [{
+            "action": c2pa_action,
+            "softwareAgent": {
+                "name": "fightfake-toolkit",
+                "version": env!("CARGO_PKG_VERSION")
+            },
+            "parameters": {
+                "description": description
+            }
+        }]
+    });
+    builder
+        .add_assertion("c2pa.actions", &actions_assertion)
+        .context("failed to add c2pa.actions")?;
+
+    // org.zkedit.edit_proof.v1 — our ZK proof assertion.
     builder
         .add_assertion(EDIT_PROOF_ASSERTION_TYPE, &edit)
         .context("failed to add org.zkedit.edit_proof.v1")?;
@@ -96,6 +118,27 @@ pub fn sign_edit_asset(
             )
         })?;
     Ok(())
+}
+
+/// Map our gadget IDs to the closest standard `c2pa.actions` action code.
+/// See https://c2pa.org/specifications/specifications/1.4/specs/C2PA_Specification.html#_actions
+fn gadget_to_c2pa_action(gadget_id: &str) -> &'static str {
+    match gadget_id {
+        "brightness" => "c2pa.color_adjustments",
+        "grayscale"  => "c2pa.color_adjustments",
+        "invert"     => "c2pa.color_adjustments",
+        "crop"       => "c2pa.cropped",
+        _            => "c2pa.edited",
+    }
+}
+
+fn gadget_description(gadget_id: &str) -> String {
+    match gadget_id {
+        "brightness" => "Brightness adjustment (luma scale 416/1024 ≈ 0.41×)".to_owned(),
+        "grayscale"  => "Converted to grayscale (chroma set to neutral)".to_owned(),
+        "invert"     => "Colour invert (all channels: 255 − pixel)".to_owned(),
+        other        => format!("Edit gadget: {other}"),
+    }
 }
 
 fn make_signer(m: &SignMaterial<'_>) -> Result<Box<dyn c2pa::Signer>> {
