@@ -1,4 +1,9 @@
 target/
 .DS_Store
 *.log
+
+# prove-edit workflow outputs (raw YUV can be hundreds of MB per run)
 out/
+
+# Raw video planes produced by ffmpeg decode/encode steps
+*.yuv
