@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use c2pa_signer::{sign_capture_asset, sign_edit_asset, SignMaterial};
 use cert_gen::generate_test_cert;
 use demo::{run_level0_demo, Level0DemoConfig};
-use fightfake_core::verify::{verify_bundle, verify_signed_assets};
+use fightfake_core::verify::{verify_bundle, verify_capture_asset, verify_signed_assets};
 use pi_capture::LibcameraContract;
 use workflow::{run_prove_edit, Gadget, ProveEditConfig};
 
@@ -77,11 +77,24 @@ enum Command {
         blocks_per_step: usize,
     },
 
-    /// Verify a signed capture + edited asset pair and the associated proof.
+    /// Verify a signed capture asset (no edit proof needed).
     ///
-    /// Reads org.zkedit.* assertions directly from the C2PA manifests.
-    Verify {
+    /// Checks the C2PA signature and hard binding, then confirms the asset carries
+    /// a valid org.zkedit.capture.v1 assertion.  Use this to confirm a video was
+    /// signed at capture time before any edit was made.
+    VerifyCapture {
         /// Signed capture asset (output of prove-edit or sign-capture-manifest).
+        #[arg(long)]
+        capture: PathBuf,
+    },
+
+    /// Verify a capture + edited asset pair and the associated proof.
+    ///
+    /// Checks the C2PA signatures and hard bindings on both assets, confirms
+    /// org.zkedit.* assertions are present, h1 matches across the chain, and
+    /// the proof binary has the expected SHA-256.
+    Verify {
+        /// Signed capture asset.
         #[arg(long)]
         capture: PathBuf,
         /// Signed edited asset.
@@ -222,6 +235,21 @@ enum GadgetArg {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
+        // ── Verify ───────────────────────────────────────────────────────────
+        Command::VerifyCapture { capture } => {
+            let a = verify_capture_asset(&capture)?;
+            println!("ok — C2PA signature valid");
+            println!("device     : {}", a.device_id);
+            println!("pipeline   : {}", a.pipeline_stage);
+            println!("hash algo  : {}", a.hash_algorithm);
+            println!("h1         : {}", a.h1);
+        }
+
+        Command::Verify { capture, edited, proof } => {
+            verify_signed_assets(&capture, &edited, &proof)?;
+            println!("ok — h1 consistent, proof hash matches, C2PA manifests valid");
+        }
+
         // ── Full workflow ─────────────────────────────────────────────────────
         Command::ProveEdit {
             input,
@@ -261,15 +289,6 @@ fn main() -> Result<()> {
                 println!("NOTE: proof is a Level-0 stub (32 zero bytes).");
                 println!("      Build with `--features eva-backend` for a real ZK proof.");
             }
-        }
-
-        Command::Verify {
-            capture,
-            edited,
-            proof,
-        } => {
-            verify_signed_assets(&capture, &edited, &proof)?;
-            println!("ok — h1 consistent, proof hash matches, C2PA manifests valid");
         }
 
         // ── Plumbing commands ─────────────────────────────────────────────────

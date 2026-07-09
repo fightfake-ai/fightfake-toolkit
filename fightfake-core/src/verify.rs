@@ -49,6 +49,31 @@ pub fn verify_bundle(
     Ok(())
 }
 
+// ── Capture-only verify ───────────────────────────────────────────────────────
+
+/// Verify a signed capture asset (no edit proof required).
+///
+/// Checks:
+/// 1. C2PA signature and hard binding (done automatically by `c2pa::Reader`).
+/// 2. An `org.zkedit.capture.v1` assertion is present and well-formed.
+///
+/// Returns the parsed capture assertion so the caller can display h1,
+/// device_id, and pipeline_stage.
+pub fn verify_capture_asset(asset_path: &Path) -> Result<CaptureAssertionV1> {
+    let reader = Reader::from_file(asset_path)
+        .with_context(|| format!("failed to read C2PA from {}", asset_path.display()))?;
+
+    let manifest = reader
+        .active_manifest()
+        .ok_or_else(|| anyhow::anyhow!("no active manifest in {}", asset_path.display()))?;
+
+    let assertion: CaptureAssertionV1 =
+        find_assertion(manifest.assertions(), CAPTURE_ASSERTION_TYPE)
+            .context("asset is missing org.zkedit.capture.v1 — not a fightfake-signed capture")?;
+
+    Ok(assertion)
+}
+
 // ── Signed-asset verify ───────────────────────────────────────────────────────
 
 pub fn verify_signed_assets(
