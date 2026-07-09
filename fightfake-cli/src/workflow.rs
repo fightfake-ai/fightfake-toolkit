@@ -110,6 +110,7 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
         .with_context(|| format!("failed to create output dir {}", cfg.out_dir.display()))?;
 
     let out = |name: &str| cfg.out_dir.join(name);
+    let wall = std::time::Instant::now();
 
     // 1. Probe video dimensions.
     let (width, height, fps_num, fps_den, num_frames) = probe_video(&cfg.input)?;
@@ -129,32 +130,41 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
 
     // 2. Decode to raw planar YUV 4:2:0.
     let raw_yuv_path = out("raw_orig.yuv");
+    let t = std::time::Instant::now();
     ffmpeg_decode_to_yuv(&cfg.input, &raw_yuv_path, width, height)?;
-    println!("[workflow] decoded → {}", raw_yuv_path.display());
+    let decode_s = t.elapsed().as_secs_f64();
+    println!("[workflow] decoded → {} ({decode_s:.2}s)", raw_yuv_path.display());
     let yuv_bytes = std::fs::read(&raw_yuv_path).context("failed to read decoded YUV")?;
 
     // 3. Split into Y / U / V planes or tile into Eva macroblocks.
+    let t = std::time::Instant::now();
     let (orig_y, orig_u, orig_v) = split_yuv(&yuv_bytes, width, height, num_frames)?;
+    let tile_s = t.elapsed().as_secs_f64();
+    println!("[workflow] macroblock tiling ({tile_s:.2}s)");
 
     // 4. Apply edit gadget; compute h1 (original) and h2 (edited).
+    let t = std::time::Instant::now();
     let (edited_y, edited_u, edited_v, h1_hex, h2_hex) =
         apply_edit_and_hash(&orig_y, &orig_u, &orig_v, width, height, num_frames, &cfg.gadget)?;
-
+    let hash_s = t.elapsed().as_secs_f64();
     println!("[workflow] h1 = {h1_hex}");
     println!("[workflow] h2 = {h2_hex}");
+    println!("[workflow] edit + hash ({hash_s:.2}s)");
 
     // 5. Generate ZK proof (real or stub).
+    let t = std::time::Instant::now();
     let (proof_bytes, proof_is_stub) =
         generate_proof(&orig_y, &orig_u, &orig_v, &cfg.gadget, cfg.blocks_per_step)?;
+    let prove_s = t.elapsed().as_secs_f64();
 
     let proof_bin = out("proof.bin");
     std::fs::write(&proof_bin, &proof_bytes)
         .with_context(|| format!("failed to write proof to {}", proof_bin.display()))?;
     if proof_is_stub {
-        println!("[workflow] proof: stub (build with --features eva-backend for real proof)");
+        println!("[workflow] proof: stub — Level 0 (32 zero bytes) ({prove_s:.2}s)");
     } else {
         println!(
-            "[workflow] proof: {} bytes → {}",
+            "[workflow] proof: {} bytes → {} ({prove_s:.2}s)",
             proof_bytes.len(),
             proof_bin.display()
         );
@@ -165,9 +175,11 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
     let edited_yuv = assemble_yuv(&edited_y, &edited_u, &edited_v, width, height, num_frames)?;
     std::fs::write(&edited_yuv_path, &edited_yuv).context("failed to write edited YUV")?;
 
+    let t = std::time::Instant::now();
     let edited_mp4 = out("edited.mp4");
     ffmpeg_encode_from_yuv(&edited_yuv_path, &edited_mp4, width, height, fps_num, fps_den)?;
-    println!("[workflow] edited video → {}", edited_mp4.display());
+    let encode_s = t.elapsed().as_secs_f64();
+    println!("[workflow] edited video → {} ({encode_s:.2}s)", edited_mp4.display());
 
     // 7. Emit C2PA assertion JSONs.
     let proof_sha256 = hex::encode(Sha256::digest(&proof_bytes));
@@ -207,9 +219,8 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
     let capture_signed_mp4 = out("capture.signed.mp4");
     let edited_signed_mp4 = out("edited.signed.mp4");
 
+    let t = std::time::Instant::now();
     sign_capture_asset(&cfg.input, &capture_signed_mp4, &capture_assertion_json, &signer)?;
-    println!("[workflow] signed capture → {}", capture_signed_mp4.display());
-
     sign_edit_asset(
         &edited_mp4,
         &edited_signed_mp4,
@@ -217,7 +228,27 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
         &edit_assertion_json,
         &signer,
     )?;
+    let sign_s = t.elapsed().as_secs_f64();
+    println!("[workflow] signed capture → {}", capture_signed_mp4.display());
     println!("[workflow] signed edited  → {}", edited_signed_mp4.display());
+    println!("[workflow] C2PA signing ({sign_s:.2}s)");
+
+    let total_s = wall.elapsed().as_secs_f64();
+
+    // Timing summary.
+    println!();
+    println!("┌─────────────────────────────────────────┬──────────┐");
+    println!("│ Phase                                   │     Time │");
+    println!("├─────────────────────────────────────────┼──────────┤");
+    println!("│ ffmpeg decode                           │ {decode_s:>6.2}s │");
+    println!("│ macroblock tiling                       │ {tile_s:>6.2}s │");
+    println!("│ edit + hashing (h1, h2)                 │ {hash_s:>6.2}s │");
+    println!("│ ZK proving (Nova IVC + Groth16)         │ {prove_s:>6.2}s │");
+    println!("│ ffmpeg re-encode                        │ {encode_s:>6.2}s │");
+    println!("│ C2PA signing                            │ {sign_s:>6.2}s │");
+    println!("├─────────────────────────────────────────┼──────────┤");
+    println!("│ Total                                   │ {total_s:>6.2}s │");
+    println!("└─────────────────────────────────────────┴──────────┘");
 
     Ok(ProveEditOutput {
         edited_mp4,

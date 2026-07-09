@@ -88,63 +88,129 @@ brew install ffmpeg        # macOS; or: apt install ffmpeg
 cargo build -p fightfake-cli --release
 ```
 
-The binary is `./target/release/fightfake`.  All commands below assume this path.
+The binary is `./target/release/fightfake`.  All commands below assume you run them from the
+`fightfake-toolkit/` directory.  Paths to input files must be relative to that directory (or
+absolute).
 
 ### Step 1 — generate a test certificate
 
-C2PA manifests must be signed with a certificate.  For testing:
+C2PA manifests must be signed.  For testing, generate a self-signed certificate:
 
 ```bash
 ./target/release/fightfake make-test-cert
-# writes testdata/certs/signer-cert.pem and testdata/certs/signer-key.pem
+# writes testdata/certs/signer-cert.pem  (certificate — public)
+#         testdata/certs/signer-key.pem   (private key  — keep secret)
 ```
 
-> **What the certificate does:** every C2PA manifest must carry a COSE_Sign1 digital
-> signature that answers *"who signed this, and are they trustworthy?"*  The private key
-> produces the signature; the certificate embeds your public key and identity inside the
-> manifest so anyone can verify it without contacting you.  The signature covers *every*
-> assertion in the manifest and every byte of the video file — changing a single pixel after
-> signing breaks it.
->
-> For production, use a certificate from a CA on the
-> [C2PA trust list](https://creator-assertions.github.io/taf/) (currently: Adobe, Truepic,
-> Leica, and others).  Swapping in a real cert requires no code changes — just pass different
-> `--cert` and `--key` files.
+#### What is a certificate and why does C2PA need one?
+
+A digital certificate is a signed statement:
+
+> *"I, a trusted authority, confirm that this public key belongs to this entity."*
+
+More concretely: a certificate is a small file that bundles together a **public key** and an
+**identity** (name, organisation, …), with a signature from a Certificate Authority (CA)
+confirming they belong together.  The corresponding **private key** is kept secret and is
+used to produce signatures.
+
+C2PA requires every manifest to carry a **COSE_Sign1** signature — a compact binary
+envelope (defined in [RFC 8152](https://www.rfc-editor.org/rfc/rfc8152)) that bundles:
+
+1. The **signed payload** — a hash of all the assertions in the manifest.
+2. The **algorithm** — ES256 (ECDSA P-256 with SHA-256).
+3. The **certificate** — so verifiers can identify the signer and check its trust chain.
+4. The **signature bytes** — produced by the private key over the payload hash.
+
+Because the signature covers the assertions hash, and the assertions include
+`c2pa.hash.bmff.v3` (a byte-range hash of the entire MP4 container), the COSE_Sign1
+transitively covers every byte of the video.  Changing a single pixel after signing breaks
+the manifest.
+
+#### Self-signed vs. CA-issued certificates
+
+| | Self-signed (test) | CA-issued (production) |
+|---|---|---|
+| How generated | `make-test-cert` (this toolkit) | Apply to a CA on the C2PA trust list |
+| Who confirms the identity | Nobody — you assert it yourself | A trusted CA (Adobe, Truepic, Leica, …) |
+| Online validator result | ⚠️ "not from a trusted source" | ✅ trusted signer |
+| Signature validity | ✅ mathematically valid | ✅ mathematically valid |
+| Good for | Local testing, integration tests | Production, public distribution |
+
+Swapping in a real certificate requires no code changes — just pass different `--cert` and
+`--key` files to any command.
 
 ### Step 2 — prove an edit
 
 ```bash
 ./target/release/fightfake prove-edit \
-  --input  my-video.mp4 \
+  --input  testdata/videos/input/my-video.mp4 \
   --gadget brightness \
   --gadget-param 416 \
   --out-dir out/
 ```
 
-This runs the full pipeline:
+> **Note on paths:** the path after `--input` is relative to the directory where you run the
+> command.  If the file is in `testdata/videos/input/`, use that prefix explicitly.
+
+This runs the full pipeline in one shot:
 
 ```
-my-video.mp4
-  │ ffmpeg: decode to raw YUV frames
+testdata/videos/input/my-video.mp4
+  │ ffmpeg: decode to raw YUV 4:2:0
   ▼
-raw pixels (YUV 4:2:0)
-  ├──► hash → h1  (original fingerprint)
-  │
-  │ apply brightness scale 416/1024
+raw pixels — one frame = width × height luma bytes + half-res chroma
+  │ tile into 16×16 macroblocks  ← Eva's unit of operation
   ▼
-edited pixels
-  ├──► hash → h2  (edited fingerprint)
-  ├──► [Level 1] Nova IVC + Groth16 → proof.bin
+Eva macroblocks (orig_y / orig_u / orig_v, in macroblock order)
+  ├──► SHA-256 over all macroblocks → h1  (original fingerprint)
   │
-  │ ffmpeg: re-encode to H.264
+  │ apply brightness scale 416/1024 to each luma byte
+  ▼
+edited macroblocks
+  ├──► SHA-256 over edited macroblocks → h2  (edited fingerprint)
+  │
+  │ [Level 0] record SHA-256 of a 32-byte stub as proof reference
+  │ [Level 1] Nova IVC: prove each macroblock was transformed correctly
+  │           → Groth16 decider: compress IVC argument → proof.bin
+  │
+  │ untile macroblocks → planar YUV → ffmpeg: re-encode to H.264
   ▼
 out/edited.mp4
-out/capture.signed.mp4    ← C2PA-signed original; contains h1
-out/edited.signed.mp4     ← C2PA-signed edited video; contains h2 + proof reference
-out/proof.bin             ← ZK proof (or placeholder in Level 0)
+out/capture.signed.mp4    ← C2PA manifest: h1 + device ID + hard binding
+out/edited.signed.mp4     ← C2PA manifest: h2 + proof reference + ingredient chain
+out/proof.bin             ← ZK proof (or 32-byte stub in Level 0)
 ```
 
-Available gadgets: `brightness` (default), `grayscale`, `invert`.
+**Why macroblocks?**  Eva's IVC circuit processes video one 16×16 pixel block at a time.
+Each IVC step proves that the edit gadget was applied correctly to one (or more) macroblocks
+and that the hash chain (h1 or h2) advanced correctly.  This makes the proof incremental:
+a 1-second clip and a 10-minute clip use the same per-step circuit, just with more steps.
+
+**Level 0 vs Level 1:** by default (no `--features eva-backend`) the proof is a 32-byte
+zero placeholder.  The edit, hashes, and C2PA manifests are real and fully usable for
+integration testing.  Build with `--features eva-backend` for a real Nova IVC + Groth16
+proof.  See the [Capture levels](#capture-levels--how-trustworthy-is-h1) section for the
+full four-level trust model.
+
+**Timing:** at the end of the run a table is printed showing time per phase:
+
+```
+┌─────────────────────────────────────────┬──────────┐
+│ Phase                                   │     Time │
+├─────────────────────────────────────────┼──────────┤
+│ ffmpeg decode                           │   0.43s  │
+│ macroblock tiling                       │   0.02s  │
+│ edit + hashing (h1, h2)                 │   0.11s  │
+│ ZK proving (Nova IVC + Groth16)         │   0.00s  │   ← Level 0 stub
+│ ffmpeg re-encode                        │   0.38s  │
+│ C2PA signing                            │   0.14s  │
+├─────────────────────────────────────────┼──────────┤
+│ Total                                   │   1.08s  │
+└─────────────────────────────────────────┴──────────┘
+```
+
+With Level 1 (`--features eva-backend`), the "ZK proving" row dominates and typically takes
+several minutes for a short clip on an M-series Mac.
 
 ### Step 3 — verify an edit proof
 
@@ -221,14 +287,68 @@ they don't recognise as a custom extension, without treating it as an error.
 
 ---
 
+## Standard C2PA vs. fightfake C2PA
+
+The `c2pa-sign` command produces a *plain* C2PA manifest — exactly what you'd get from any
+standard C2PA-aware video editor.  The `prove-edit` command produces a *fightfake* manifest
+that extends the standard with pixel fingerprints and a ZK proof.
+
+```bash
+# Standard C2PA — "I assert that this brightness edit was made"
+./target/release/fightfake c2pa-sign \
+  --input  testdata/videos/input/my-video.mp4 \
+  --output out/standard-signed.mp4 \
+  --action c2pa.color_adjustments \
+  --description "Brightness adjustment"
+
+# Fightfake C2PA — "I can prove, mathematically, that only this brightness edit was made"
+./target/release/fightfake prove-edit \
+  --input  testdata/videos/input/my-video.mp4 \
+  --gadget brightness \
+  --gadget-param 416 \
+  --out-dir out/
+```
+
+### What's inside each manifest
+
+| Assertion | Standard C2PA (`c2pa-sign`) | Fightfake C2PA (`prove-edit`) |
+|---|---|---|
+| `c2pa.hash.bmff.v3` (hard binding) | ✅ auto-added | ✅ auto-added |
+| `c2pa.actions` (edit description) | ✅ human-readable | ✅ human-readable |
+| `c2pa.ingredient` (parent link) | — | ✅ links to signed capture |
+| `org.zkedit.capture.v1` (h1 fingerprint) | — | ✅ original pixel hash |
+| `org.zkedit.edit_proof.v1` (h2 + proof ref) | — | ✅ edited pixel hash + proof |
+| `proof.bin` (ZK proof blob) | — | ✅ (stub in Level 0; real in Level 1) |
+
+### What each approach can (and cannot) prove
+
+| Claim | Standard C2PA | Fightfake C2PA |
+|---|---|---|
+| "This file hasn't been modified since signing" | ✅ | ✅ |
+| "This video came from a specific camera/device" | ✅ (if camera has C2PA support) | ✅ |
+| "A brightness edit was declared" | ✅ | ✅ |
+| "Exactly this brightness edit — and nothing else — was applied" | ❌ no proof | ✅ ZK proof |
+| "The edit was applied to the specific original identified by h1" | ❌ | ✅ |
+| "The proof can be verified without the original video" | ❌ | ✅ |
+
+Standard C2PA is a **declaration** — the signer asserts that an edit was made, and you
+trust them because their certificate is from a trusted CA.  Fightfake adds a
+**cryptographic proof** — you don't need to trust anyone, because the math guarantees it.
+
+Both manifests are readable by the same C2PA tools (browser extension, online validator).
+Standard C2PA viewers will display the fightfake manifest correctly, showing the `c2pa.actions`
+assertion and noting the `org.zkedit.*` assertions as custom extensions.
+
+---
+
 ## Commands reference
 
-### `prove-edit` — full workflow
+### `prove-edit` — full fightfake workflow
 
 ```
 fightfake prove-edit --input <VIDEO> [OPTIONS]
 
-  --input, -i <FILE>       Input video (MP4 or any container ffmpeg can decode)
+  --input, -i <FILE>       Input video (path relative to cwd, or absolute)
   --gadget <NAME>          Edit to apply: brightness | grayscale | invert  [default: brightness]
   --gadget-param <N>       Gadget-specific parameter:
                              brightness: luma scale in units of 1/1024 (default 416 ≈ 0.41×)
@@ -248,12 +368,31 @@ Expect ~5 min for a 10-second 352×288 clip on an M2 Mac; longer for higher reso
 ```bash
 # Level 0 — fast, for integration testing
 cargo build -p fightfake-cli --release
-./target/release/fightfake prove-edit --input clip.mp4
+./target/release/fightfake prove-edit --input testdata/videos/input/clip.mp4
 
 # Level 1 — real ZK proof (first build takes 10–20 min)
 cargo build -p fightfake-cli --release --features eva-backend
-./target/release/fightfake prove-edit --input clip.mp4
+./target/release/fightfake prove-edit --input testdata/videos/input/clip.mp4
 ```
+
+### `c2pa-sign` — standard C2PA manifest (no ZK)
+
+```
+fightfake c2pa-sign --input <VIDEO> --output <VIDEO> [OPTIONS]
+
+  --input, -i <FILE>       Input video
+  --output, -o <FILE>      Output signed video
+  --title <STR>            Manifest title  [default: "C2PA-signed video"]
+  --action <LABEL>         C2PA action code  [default: c2pa.edited]
+                           Common values: c2pa.color_adjustments, c2pa.cropped
+  --description <STR>      Human-readable description of the edit
+  --cert <FILE>            PEM certificate  [default: testdata/certs/signer-cert.pem]
+  --key  <FILE>            PEM private key   [default: testdata/certs/signer-key.pem]
+```
+
+Produces a standard C2PA manifest with `c2pa.actions` + BMFF hard binding.  No pixel
+fingerprints, no ZK proof.  Use this to compare with `prove-edit` output side-by-side in
+the online validator.
 
 ### `verify-capture` — check a signed capture
 

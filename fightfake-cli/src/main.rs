@@ -14,7 +14,7 @@ use fightfake_core::assertions::{
 };
 use sha2::{Digest, Sha256};
 
-use c2pa_signer::{sign_capture_asset, sign_edit_asset, SignMaterial};
+use c2pa_signer::{sign_capture_asset, sign_edit_asset, sign_plain_c2pa, SignMaterial};
 use cert_gen::generate_test_cert;
 use demo::{run_level0_demo, Level0DemoConfig};
 use fightfake_core::verify::{verify_bundle, verify_capture_asset, verify_signed_assets};
@@ -179,6 +179,46 @@ enum Command {
         capture_schema: PathBuf,
         #[arg(long, default_value = "./schemas/org.zkedit.edit_proof.v1.schema.json")]
         edit_schema: PathBuf,
+    },
+
+    /// Sign a video with a plain (standard) C2PA manifest — no ZK assertions.
+    ///
+    /// Produces a manifest that any standard C2PA viewer understands, containing
+    /// only a `c2pa.actions` assertion and the automatic BMFF hard binding.
+    /// No pixel fingerprints (h1/h2) and no ZK proof are embedded.
+    ///
+    /// Use this to compare a standard C2PA-signed video with a fightfake-signed
+    /// one (produced by `prove-edit`).  The difference is:
+    ///   standard: "I assert that this edit was made"  (no proof)
+    ///   fightfake: "I can prove, mathematically, that only this edit was made"
+    C2paSign {
+        /// Input video (MP4 or any container ffmpeg can decode).
+        #[arg(long, short)]
+        input: PathBuf,
+
+        /// Output signed video.
+        #[arg(long, short)]
+        output: PathBuf,
+
+        /// Human-readable title for the manifest.
+        #[arg(long, default_value = "C2PA-signed video")]
+        title: String,
+
+        /// C2PA action label (e.g. c2pa.color_adjustments, c2pa.cropped).
+        #[arg(long, default_value = "c2pa.edited")]
+        action: String,
+
+        /// Description of the edit.
+        #[arg(long, default_value = "Video processed with fightfake-toolkit")]
+        description: String,
+
+        /// PEM certificate for C2PA signing.
+        #[arg(long, default_value = "testdata/certs/signer-cert.pem")]
+        cert: PathBuf,
+
+        /// PEM private key for C2PA signing.
+        #[arg(long, default_value = "testdata/certs/signer-key.pem")]
+        key: PathBuf,
     },
 
     /// Generate a self-signed P-256 test certificate (ES256, required by C2PA).
@@ -383,6 +423,21 @@ fn main() -> Result<()> {
                 &edit_schema,
             )?;
             println!("ok");
+        }
+
+        Command::C2paSign { input, output, title, action, description, cert, key } => {
+            sign_plain_c2pa(
+                &input,
+                &output,
+                &title,
+                &action,
+                &description,
+                &SignMaterial { cert_path: &cert, key_path: &key },
+            )?;
+            println!("signed: {}", output.display());
+            println!();
+            println!("This is a standard C2PA manifest with no ZK proof.");
+            println!("Compare with `prove-edit` to see the fightfake additions.");
         }
 
         Command::MakeTestCert { out_dir } => {

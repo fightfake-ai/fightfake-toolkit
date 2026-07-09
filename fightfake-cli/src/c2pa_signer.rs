@@ -141,6 +141,57 @@ fn gadget_description(gadget_id: &str) -> String {
     }
 }
 
+/// Sign a video with a plain (standard) C2PA manifest — no ZK assertions.
+///
+/// Produces a manifest that any standard C2PA viewer understands:
+/// - `c2pa.actions` describing the edit in human-readable form.
+/// - `c2pa.hash.bmff.v3` hard binding (added automatically by c2pa-rs).
+/// - No `org.zkedit.*` assertions, no pixel fingerprints, no proof.
+///
+/// This is what you would produce with any standard C2PA tool.
+/// Contrast with `sign_edit_asset`, which additionally embeds `org.zkedit.*`
+/// assertions and links to a ZK proof.
+pub fn sign_plain_c2pa(
+    source_asset: &Path,
+    dest_asset: &Path,
+    title: &str,
+    action_label: &str,
+    description: &str,
+    signer: &SignMaterial<'_>,
+) -> Result<()> {
+    let mut builder =
+        Builder::from_json(&json!({ "title": title }).to_string())
+            .context("failed to initialize plain C2PA builder")?;
+
+    let actions_assertion = json!({
+        "actions": [{
+            "action": action_label,
+            "softwareAgent": {
+                "name": "fightfake-toolkit",
+                "version": env!("CARGO_PKG_VERSION")
+            },
+            "parameters": {
+                "description": description
+            }
+        }]
+    });
+    builder
+        .add_assertion("c2pa.actions", &actions_assertion)
+        .context("failed to add c2pa.actions")?;
+
+    let signer = make_signer(signer)?;
+    builder
+        .sign_file(&*signer, source_asset, dest_asset)
+        .with_context(|| {
+            format!(
+                "failed to sign {} → {}",
+                source_asset.display(),
+                dest_asset.display()
+            )
+        })?;
+    Ok(())
+}
+
 fn make_signer(m: &SignMaterial<'_>) -> Result<Box<dyn c2pa::Signer>> {
     create_signer::from_files(m.cert_path, m.key_path, SigningAlg::Es256, None)
         .context("failed to build C2PA signer from cert/key files")
