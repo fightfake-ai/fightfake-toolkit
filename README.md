@@ -9,16 +9,28 @@ trusting the editor.
 
 When someone shares an edited video — a colour-corrected aerial shot, a brightness-adjusted
 security clip, a cropped news footage — there is currently no way to verify that the only
-change made was the declared edit.  The video file might carry a digital signature proving it
-came from a specific camera, but the signature says nothing about what happened between
-capture and publication.  A deep-fake or a subtle manipulation is indistinguishable from a
-legitimate edit.
+change made was the declared edit.
 
-**fightfake-toolkit** lets an editor prove, mathematically, that a specific transformation
-(brightness, grayscale, invert, …) is the *only* difference between an original captured video
-and the version being published.  The proof is compact, embeds directly in the video's
-provenance record, and can be checked by anyone — including in a web browser — without
-access to the original footage.
+**Wait — doesn't C2PA already solve this?**  Partly.  The
+[C2PA standard](https://c2pa.org) (used by Adobe Photoshop, Lightroom, and many cameras
+today) lets a signer *declare* what edits were made and attach a certificate to that
+declaration.  You can open such a file in a C2PA viewer and read: "brightness was adjusted,
+signed by Adobe".  What you cannot do is *verify* that claim independently — you have to
+trust that Adobe's signing pipeline was not compromised, that the signer's private key was
+not misused, and that the description is accurate.  A deep-fake with a stolen or misleading
+certificate is indistinguishable from a legitimate edit.
+
+**fightfake-toolkit** closes that gap.  Instead of a declaration backed by institutional
+trust, it produces a **mathematical proof** — a compact blob of bytes that any verifier can
+check independently, without trusting the signer, without access to the original footage, and
+without any knowledge of who produced the video.  The proof shows that a specific pixel-level
+transformation (brightness, grayscale, invert, …) is the *only* difference between the
+captured original and the published version.  If even a single pixel was changed in any other
+way, the proof does not verify.
+
+In short:
+- **Standard C2PA:** *"Trust me — I declare this is what was edited."*
+- **fightfake:** *"Don't trust me — verify it yourself. The math guarantees it."*
 
 ---
 
@@ -70,8 +82,11 @@ blob (~200 bytes for BN254/Groth16) that proves, without revealing the original 
 > "The edited pixels are the result of applying the declared edit gadget to the original
 > pixels identified by h1, producing h2. No other change was made."
 
-A verifier checks this proof in milliseconds.  The math underlying it (Nova IVC + Groth16)
-ensures that generating a false proof is computationally infeasible.
+This is precisely what standard C2PA cannot provide: not a declaration of what happened, but
+an unforgeable mathematical certificate that *only* the declared edit occurred.  A verifier
+checks the proof in milliseconds.  The math underlying it (Nova IVC + Groth16) ensures that
+generating a convincing false proof is computationally infeasible — even for the person who
+signed the video.
 
 The proof embeds in the C2PA manifest as a custom assertion (`org.zkedit.edit_proof.v1`),
 so existing C2PA tools can carry it without modification, and fightfake-aware tools can
@@ -348,16 +363,24 @@ of who signed it.
 
 | Claim | Standard C2PA | Fightfake C2PA |
 |---|---|---|
-| "This file hasn't been modified since signing" | ✅ | ✅ |
+| "This file hasn't been modified since signing" | ✅ hard binding | ✅ hard binding |
 | "This video came from a specific camera/device" | ✅ (if camera has C2PA support) | ✅ |
 | "A brightness edit was declared" | ✅ | ✅ |
-| "Exactly this brightness edit — and nothing else — was applied" | ❌ no proof | ✅ ZK proof |
+| "Exactly this brightness edit — and *nothing else* — was applied" | ❌ trust the signer | ✅ ZK proof |
 | "The edit was applied to the specific original identified by h1" | ❌ | ✅ |
-| "The proof can be verified without the original video" | ❌ | ✅ |
+| "Verifiable without access to the original footage" | ❌ | ✅ |
+| "Verifiable without trusting the signer" | ❌ | ✅ |
 
-Standard C2PA is a **declaration** — the signer asserts that an edit was made, and you
-trust them because their certificate is from a trusted CA.  Fightfake adds a
-**cryptographic proof** — you don't need to trust anyone, because the math guarantees it.
+**The core distinction:**
+Standard C2PA shifts the trust question to certificates: you verify the signer's certificate
+chains to a trusted CA, then accept the signer's declaration.  If the signer's key is
+compromised, or if the pipeline that produces the declaration is manipulated, you have no way
+to detect it.
+
+Fightfake eliminates that trust dependency.  The ZK proof is a mathematical object: if it
+verifies, the declared edit is the only pixel-level change, period — regardless of who
+signed the file, whether their certificate is trusted, or whether their infrastructure was
+compromised.
 
 Both manifests are readable by the same C2PA tools (browser extension, online validator).
 Standard C2PA viewers will display the fightfake manifest correctly, showing the `c2pa.actions`
