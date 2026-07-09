@@ -43,7 +43,7 @@ use fightfake_core::assertions::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::c2pa_signer::{sign_capture_asset, sign_edit_asset, SignMaterial};
+use crate::c2pa_signer::{sign_capture_asset, sign_edit_asset, CropInfo, SignMaterial};
 use crate::ffmpeg::{ffmpeg_decode_to_yuv, ffmpeg_encode_from_yuv, probe_video};
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -124,15 +124,18 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
     // pixel values are resampled.
     let width  = (orig_w / 16) * 16;
     let height = (orig_h / 16) * 16;
-    if width != orig_w || height != orig_h {
+    let crop_info = if width != orig_w || height != orig_h {
         println!(
-            "[workflow] note: cropping {orig_w}×{orig_h} → {width}×{height} \
+            "[workflow] note: auto-cropping {orig_w}×{orig_h} → {width}×{height} \
              ({} col(s) and {} row(s) removed from the bottom-right edge; \
-             Eva requires multiples of 16)",
+             Eva requires multiples of 16; h1 covers the cropped frame only)",
             orig_w - width,
             orig_h - height,
         );
-    }
+        Some(CropInfo { orig_width: orig_w, orig_height: orig_h, cropped_width: width, cropped_height: height })
+    } else {
+        None
+    };
 
     // 2. Decode to raw planar YUV 4:2:0.
     let raw_yuv_path = out("raw_orig.yuv");
@@ -226,7 +229,7 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
     let edited_signed_mp4 = out("edited.signed.mp4");
 
     let t = std::time::Instant::now();
-    sign_capture_asset(&cfg.input, &capture_signed_mp4, &capture_assertion_json, &signer)?;
+    sign_capture_asset(&cfg.input, &capture_signed_mp4, &capture_assertion_json, &signer, crop_info.as_ref())?;
     sign_edit_asset(
         &edited_mp4,
         &edited_signed_mp4,

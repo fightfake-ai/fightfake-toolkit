@@ -14,17 +14,51 @@ pub struct SignMaterial<'a> {
     pub key_path: &'a Path,
 }
 
+/// Crop dimensions recorded in the capture manifest when the source video
+/// was auto-cropped to satisfy Eva's 16-pixel alignment requirement.
+pub struct CropInfo {
+    pub orig_width: usize,
+    pub orig_height: usize,
+    pub cropped_width: usize,
+    pub cropped_height: usize,
+}
+
 pub fn sign_capture_asset(
     source_asset: &Path,
     dest_asset: &Path,
     capture_assertion_path: &Path,
     signer: &SignMaterial<'_>,
+    crop: Option<&CropInfo>,
 ) -> Result<()> {
     let capture = read_capture_assertion(capture_assertion_path)?;
     let mut builder = Builder::from_json(
         &json!({ "title": format!("FightFake capture: {}", capture.device_id) }).to_string(),
     )
     .context("failed to initialize capture C2PA builder")?;
+
+    // If auto-crop was applied, record it as a standard c2pa.cropped action so
+    // verifiers know h1 covers (cropped_width × cropped_height), not the full frame.
+    if let Some(c) = crop {
+        let crop_assertion = json!({
+            "actions": [{
+                "action": "c2pa.cropped",
+                "softwareAgent": {
+                    "name": "fightfake-toolkit",
+                    "version": env!("CARGO_PKG_VERSION")
+                },
+                "parameters": {
+                    "description": format!(
+                        "Auto-cropped {}×{} → {}×{} to satisfy 16-pixel macroblock alignment \
+                         required by the ZK prover. h1 fingerprint covers the cropped frame only.",
+                        c.orig_width, c.orig_height, c.cropped_width, c.cropped_height
+                    )
+                }
+            }]
+        });
+        builder
+            .add_assertion("c2pa.actions", &crop_assertion)
+            .context("failed to add c2pa.cropped action")?;
+    }
 
     builder
         .add_assertion(CAPTURE_ASSERTION_LABEL, &capture)
@@ -109,6 +143,7 @@ pub fn sign_edit_asset(
         .context("failed to add org.zkedit.edit_proof")?;
 
     let signer = make_signer(signer)?;
+    remove_if_exists(dest_asset)?;
     builder
         .sign_file(&*signer, source_asset, dest_asset)
         .with_context(|| {

@@ -169,28 +169,43 @@ Eva macroblocks (orig_y / orig_u / orig_v, in macroblock order)
 edited macroblocks
   ├──► SHA-256 over edited macroblocks → h2  (edited fingerprint)
   │
-  │ [Level 0] record SHA-256 of a 32-byte stub as proof reference
-  │ [Level 1] Nova IVC: prove each macroblock was transformed correctly
-  │           → Groth16 decider: compress IVC argument → proof.bin
+  │ [stub build]  record SHA-256 of a 32-byte zero placeholder as proof reference
+  │ [full build]  Nova IVC: prove each macroblock was transformed correctly
+  │               → Groth16 decider: compress IVC argument → proof.bin
+  │               (build with --features eva-backend)
   │
   │ untile macroblocks → planar YUV → ffmpeg: re-encode to H.264
   ▼
 out/edited.mp4
 out/capture.signed.mp4    ← C2PA manifest: h1 + device ID + hard binding
 out/edited.signed.mp4     ← C2PA manifest: h2 + proof reference + ingredient chain
-out/proof.bin             ← ZK proof (or 32-byte stub in Level 0)
+out/proof.bin             ← ZK proof (or 32-byte stub in stub build)
 ```
+
+**Auto-crop and h1 coverage:** Eva's IVC circuit requires video dimensions that are exact
+multiples of 16 pixels.  Most cameras (including the 1920×1080 example above) produce
+non-aligned dimensions — 1080 is not divisible by 16.  The toolkit automatically crops to
+the largest aligned size: 1920×1072 in this case (8 rows removed from the bottom edge, no
+pixel resampling).  This crop is recorded as a `c2pa.actions / c2pa.cropped` assertion in
+the capture manifest, so any C2PA viewer knows h1 covers the cropped frame, not the
+original full-resolution frame.  Verifiers must apply the same crop before computing h1.
 
 **Why macroblocks?**  Eva's IVC circuit processes video one 16×16 pixel block at a time.
 Each IVC step proves that the edit gadget was applied correctly to one (or more) macroblocks
 and that the hash chain (h1 or h2) advanced correctly.  This makes the proof incremental:
 a 1-second clip and a 10-minute clip use the same per-step circuit, just with more steps.
 
-**Level 0 vs Level 1:** by default (no `--features eva-backend`) the proof is a 32-byte
-zero placeholder.  The edit, hashes, and C2PA manifests are real and fully usable for
-integration testing.  Build with `--features eva-backend` for a real Nova IVC + Groth16
-proof.  See the [Capture levels](#capture-levels--how-trustworthy-is-h1) section for the
-full four-level trust model.
+**Stub build vs. full build:** by default (no `--features eva-backend`) the proof is a
+32-byte zero placeholder — call this the *stub build*.  The edit, hashes, and C2PA manifests
+are real and fully usable for integration testing.  Build with `--features eva-backend` for
+a real Nova IVC + Groth16 proof — the *full build*.
+
+This is different from the **capture levels** (Level 0–3) described in the
+[trust model section](#capture-levels--how-trustworthy-is-h1).  The levels are about how
+much you trust h1 (the original pixel fingerprint): Level 0 means a software app computed
+h1 from an existing recording; Level 3 means silicon-level hardware produced it.  The ZK
+proof is cryptographically sound regardless of the level — the level only tells you how hard
+it is for an attacker to substitute a different recording before h1 is computed.
 
 **Timing:** at the end of the run a table is printed showing time per phase:
 
@@ -294,20 +309,29 @@ standard C2PA-aware video editor.  The `prove-edit` command produces a *fightfak
 that extends the standard with pixel fingerprints and a ZK proof.
 
 ```bash
-# Standard C2PA — "I assert that this brightness edit was made"
+# Standard C2PA — declares that a brightness edit was made (just like Adobe Photoshop,
+# DaVinci Resolve, and any other C2PA-compliant editor would produce)
 ./target/release/fightfake c2pa-sign \
   --input  testdata/videos/input/my-video.mp4 \
   --output out/standard-signed.mp4 \
   --action c2pa.color_adjustments \
   --description "Brightness adjustment"
 
-# Fightfake C2PA — "I can prove, mathematically, that only this brightness edit was made"
+# Fightfake C2PA — additionally proves, mathematically, that ONLY this brightness edit
+# was made and that no other pixel was changed
 ./target/release/fightfake prove-edit \
   --input  testdata/videos/input/my-video.mp4 \
   --gadget brightness \
   --gadget-param 416 \
   --out-dir out/
 ```
+
+Standard C2PA already supports describing brightness/colour edits via the
+`c2pa.color_adjustments` action code, and this is used in practice today by tools like
+Photoshop and Lightroom.  The difference is not *what* edit is declared, but *how* it is
+supported: standard C2PA is a **declaration** backed by the signer's identity and
+certificate; fightfake adds a **cryptographic proof** that verifiers can check independently
+of who signed it.
 
 ### What's inside each manifest
 

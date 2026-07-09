@@ -99,6 +99,7 @@ pub fn run_level0_demo(cfg: Level0DemoConfig) -> Result<()> {
         &cfg.capture_signed_out,
         &cfg.capture_assertion_out,
         &signer,
+        None, // demo uses pre-aligned inputs
     )?;
     sign_edit_asset(
         &cfg.edited_input,

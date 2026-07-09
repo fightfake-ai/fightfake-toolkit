@@ -386,6 +386,7 @@ fn main() -> Result<()> {
                 &dest_asset,
                 &capture_assertion,
                 &SignMaterial { cert_path: &cert_pem, key_path: &key_pem },
+                None, // no auto-crop in the plumbing command
             )?;
             println!("{}", dest_asset.display());
         }
