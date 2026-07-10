@@ -370,33 +370,38 @@ one sense (the computation happens in your browser, not their server), but the s
 controls both the proof and the JS.  A compromised or dishonest fightfake.ai can serve JS
 that always returns `true`.
 
-### Level C — browser extension (trustless in-browser verification)
+### Level C — fightfake.ai/verify page (convenient, reasonable trust)
 
-A browser extension is installed by the user, not served by any website.  It runs
-independently of the page and cannot be overridden by the page operator.
+A user who encounters a proof on proofdrop.ai can download the proof bundle
+(`edited.signed.mp4` + `proof.bin`) and upload it to **fightfake.ai/verify**.  The
+verification WASM runs inside the user's own browser — not on fightfake.ai's server.
+fightfake.ai sees nothing but the page load; the actual cryptographic check is local.
 
-Consider the proofdrop.ai scenario: a journalist site publishes an article with a video
-and a proof.  The page operator (proofdrop.ai) controls all the HTML, JS, and any WASM
-loaded by that page.  Even if the WASM is fetched from fightfake.ai's CDN with an SRI
-hash, proofdrop.ai controls the HTML that contains that hash — they can put any hash they
-like, pointing to any WASM they like.  **SRI protects against CDN compromise; it does not
-protect against a dishonest page operator.**
+The trust model here: the user is choosing to trust fightfake.ai by navigating to their
+page, the same way you trust any web service.  This is reasonable for most non-technical
+users who care about verification but won't install a CLI.
 
-A browser extension breaks this dependency.  The extension:
-1. Detects C2PA manifests embedded in videos on any page it visits.
-2. Extracts the `org.zkedit.*` assertions and the proof reference.
-3. Fetches `proof.bin` independently.
-4. Runs the Groth16 verification using its own bundled WASM — code the user installed,
-   not code served by proofdrop.ai.
-5. Shows a verification badge that proofdrop.ai cannot spoof.
+### Level D — browser extension (seamless, automatic, independent of page operator)
 
-The [C2PA browser extension](https://contentauthenticity.org/get-started) from the Content
-Authenticity Initiative already does steps 1–2 and 5 for standard C2PA (signature + hard
-binding).  fightfake.ai needs to extend this — or build a companion extension — to add
-steps 3–4 (proof fetching and Groth16 verification).  This is the correct trustless
-browser model and is on the roadmap.
+A browser extension is installed once from the Chrome or Firefox extension store.  After
+that it runs automatically on every page the user visits — no extra steps.
 
-### Level D — CLI verification (strongest, for technical users)
+Consider proofdrop.ai: a journalist publishes an article with a signed video.  A user with
+the fightfake.ai extension installed just visits the page normally.  The extension
+automatically detects the C2PA manifest embedded in the video, fetches `proof.bin`,
+runs Groth16 verification using its own bundled code (installed by the user, not served
+by proofdrop.ai), and shows a badge in the video or toolbar.  proofdrop.ai cannot interfere
+with this — the extension code comes from the extension store, not from the page.
+
+This is exactly how the existing [C2PA browser extension](https://contentauthenticity.org/get-started)
+from the Content Authenticity Initiative already works for standard C2PA.  A fightfake.ai
+extension would extend it with ZK proof verification.
+
+Trust model: you trust fightfake.ai's extension code, which you installed from the extension
+store.  The extension store (Google/Mozilla) applies its own review and code-signing, so the
+trust chain is: Google/Mozilla → fightfake.ai → the code running in your browser.
+
+### Level E — CLI verification (strongest, for technical users)
 
 Download the `fightfake` binary (or compile it from this repository) and run:
 
@@ -413,26 +418,26 @@ standard for anyone who wants to verify a proof without trusting the website at 
 
 ### Summary
 
-| Verification method | Who controls the verifier code | Trust required in website |
-|---|---|---|
-| Server-side check, badge on page | Website server | Full trust |
-| JS/WASM served by the page | Page operator | Full trust |
-| WASM on a CDN with SRI pinned in page HTML | Page operator controls the hash | Full trust (SRI only stops CDN tampering, not dishonest page operator) |
-| **Browser extension** | **User — installed independently** | **None** |
-| **CLI from open-source build** | **User — compiled locally** | **None** |
+| Level | Verification method | Who controls the verifier | Extra steps for user | Trust in page operator |
+|---|---|---|---|---|
+| A | Server-side badge on the page | Page operator's server | None | Full |
+| B | JS/WASM served by the page | Page operator | None | Full |
+| C | fightfake.ai/verify page (WASM in browser) | fightfake.ai | Download + upload proof | Trust fightfake.ai |
+| D | fightfake.ai browser extension | Extension store + fightfake.ai | Install extension once | None |
+| E | CLI compiled from source | User | Download / build CLI | None |
 
-**The website's green button is a convenience, not a security primitive.**  A website can
-always fake it.  The security primitive is the proof file and the open-source verifier
-running under the user's control — either as a browser extension or as the CLI.
+**The page's green button is a convenience, not a security primitive.**  Any page can fake
+it.  The security primitive is the proof file and the open-source verifier running under
+the user's control.
 
-**Practical deployment:**
-- fightfake.ai's own website can show a badge using its own server-side check — this is
-  fine because fightfake.ai produced the proof system and the badge is just a UX nicety.
-- Third-party sites like proofdrop.ai should either link to a downloadable proof bundle
-  for CLI verification, or rely on a fightfake.ai browser extension that users install once
-  and that then works on any site.
-- The browser extension is the correct long-term answer for trustless in-browser
-  verification across any website.
+**For most non-technical users:** the fightfake.ai/verify page (Level C) is the practical
+answer — no installation required, verification runs locally in their browser.
+
+**For seamless automatic verification on any site:** the browser extension (Level D) is the
+right long-term answer — install once, works everywhere, independent of page operators.  The
+existing C2PA browser extension from CAI is the model.
+
+**For full independence from fightfake.ai:** compile and run the CLI (Level E).
 
 **What WASM verification checks (current):**
 1. C2PA signature on both manifests is structurally valid.
