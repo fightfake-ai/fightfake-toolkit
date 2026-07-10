@@ -184,9 +184,17 @@ File: [`example-standard-c2pa-manifest.json`](example-standard-c2pa-manifest.jso
 
 ## Fightfake manifests — annotated
 
-`prove-edit` produces **two signed MP4 files**, each with its own embedded manifest.
-The edit manifest carries the capture manifest as an ingredient, forming a cryptographic
-chain: `original → capture-signed → edit-signed`.
+`prove-edit` takes one input video and produces two output MP4 files:
+
+- **`capture.signed.mp4`** — the **original** video, unchanged, with a C2PA manifest
+  embedded that records h1 (the pixel fingerprint of the original frames) and a BMFF hard
+  binding over the original encoded bytes.
+- **`edited.signed.mp4`** — the **edited** video (e.g. blurred, brightness-adjusted) with
+  a C2PA manifest that records h2 (the pixel fingerprint of the edited frames), a reference
+  to the ZK proof, and an ingredient link back to the capture manifest.
+
+The edit manifest embeds a copy of the capture manifest inside itself, forming a
+cryptographic chain: `original → capture-signed → edit-signed`.
 
 **Why two files?**
 

@@ -193,8 +193,8 @@ edited macroblocks
   │ untile macroblocks → planar YUV → ffmpeg: re-encode to H.264
   ▼
 out/edited.mp4
-out/capture.signed.mp4    ← C2PA manifest: h1 + device ID + BMFF hard binding on original
-out/edited.signed.mp4     ← C2PA manifest: h2 + proof reference + ingredient link → capture
+out/capture.signed.mp4    ← the ORIGINAL video + C2PA manifest (h1 + device ID + BMFF hard binding)
+out/edited.signed.mp4     ← the EDITED  video + C2PA manifest (h2 + proof reference + link to capture)
 out/proof.bin             ← ZK proof (or 32-byte stub in stub build)
 ```
 
