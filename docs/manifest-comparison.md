@@ -232,6 +232,14 @@ the same software that runs the edit also computed h1, so a malicious actor coul
 any h1 they like.  The capture level (0→3) determines how hard it is to forge h1 — see the
 README for details.
 
+**Does h1 appear in the edit manifest too?  Yes — in two places.**
+The `org.zkedit.edit_proof` assertion in the edit manifest contains both h1 and h2 directly,
+so a verifier can check the proof without the capture file.  Additionally, the full capture
+manifest (including its `org.zkedit.capture` assertion) is copied verbatim into the edit
+manifest as the ingredient.  A verifier cross-checks that the h1 in `edit_proof` matches
+the h1 in the embedded capture manifest — a mismatch would mean the proof covers a
+different original than the one declared.
+
 **Is the capture manifest the same as what `c2pa-sign` would produce on the original?  No.**
 `c2pa-sign` records only a human-readable action declaration (`c2pa.actions`) and a BMFF
 hard binding over the encoded container bytes — it has no knowledge of pixels.  The capture
