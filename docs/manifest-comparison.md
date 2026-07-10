@@ -190,34 +190,39 @@ chain: `original → capture-signed → edit-signed`.
 
 **Why two files?**
 
-First, the important clarification: the ZK proof is **self-contained in the edit manifest**.
-To verify the proof, you only need:
-- h1 and h2 (both in `edited.signed.mp4`'s manifest)
+First, the key point: the ZK proof is **self-contained in the edit manifest**.
+A public verifier needs only:
+- `edited.signed.mp4` (which contains h1, h2, the gadget id, and an embedded copy of the
+  capture manifest)
 - `proof.bin`
-- knowledge of which gadget was applied
 
-The original video (`capture.signed.mp4`) is **not needed for proof verification**.
+**The original video never needs to be published.**  h1 is a hash — it reveals nothing
+about what the original looks like.  A verifier learns: *whatever the original was,
+applying the declared gadget to it produces exactly this edited video, and nothing else was
+changed.*  This is the zero-knowledge property: the proof discloses only what the gadget
+declaration says, not the original content.
 
-So why does `capture.signed.mp4` exist at all?  Two reasons:
+**Concrete example — drone footage with blurred faces:**
+1. A drone records footage of criminal activity.
+2. The owner blurs faces to protect victims, using `prove-edit`.
+3. They publish only `edited.signed.mp4` + `proof.bin` (blurred video + proof).
+4. They keep `capture.signed.mp4` (original footage) **private**.
+5. Any public verifier can confirm: the blurred video differs from the original only by the
+   blur gadget — no other pixel was changed. They never see the original.
+6. If subpoenaed, the owner can produce `capture.signed.mp4` to a court or trusted
+   authority, who can verify h1 matches the original footage.
 
-1. **Auditability / discoverability.**  If a journalist or investigator wants to trace back
-   to the original footage, the C2PA ingredient link gives them a cryptographic pointer to a
-   signed artifact they can retrieve and verify independently.  h1 lets them confirm they
-   have the right file (decode it, hash the pixels, compare to h1 in the edit manifest).
-   Without the capture file the proof still verifies mathematically — but there is no
-   C2PA-traceable path back to the original.
+So `capture.signed.mp4` is not a public artefact — it is the owner's private, signed
+record of the original.  Its manifest is embedded inside `edited.signed.mp4`, so the
+C2PA signature chain can be validated by public verifiers without the original file.
 
-2. **Architecture for Level 2+.**  When h1 is eventually computed inside trusted camera
-   hardware (a TEE or secure element — see the capture levels section in the README), the
-   capture manifest is where the hardware attestation lives: a device certificate chain, a
-   TEE signature over h1, etc.  The edit manifest's ingredient link then chains to that
-   hardware-attested h1 rather than a software-computed one.
-
-   In Level 0, this is scaffolding only.  The same software that runs the edit also computed
-   h1, so the capture file adds no cryptographic security — a malicious actor could fabricate
-   any h1 they like, compute a valid proof for h1→h2, and produce two valid-looking signed
-   files.  The capture level (0→3) is what determines how hard it is to forge h1, not the
-   presence of a signed capture file itself.
+**Architecture for Level 2+.**  When h1 is eventually produced inside trusted camera
+hardware (a TEE or secure silicon), the capture manifest is where the hardware attestation
+lives: a device certificate chain, a TEE signature over h1.  The ingredient link in
+`edited.signed.mp4` then chains to that hardware-rooted h1.  In Level 0 (software only),
+the same software that runs the edit also computed h1, so a malicious actor could fabricate
+any h1 they like.  The capture level (0→3) determines how hard it is to forge h1 — see the
+README for details.
 
 Note: `c2pa-sign` produces a completely different, simpler output — a single file with only
 a `c2pa.actions` declaration and a BMFF hash.  It is not one of the two fightfake files.

@@ -200,21 +200,27 @@ out/proof.bin             ← ZK proof (or 32-byte stub in stub build)
 
 **Why two signed MP4 files?**
 
-The ZK proof is **self-contained in the edit manifest**.  To verify it you only need
-`edited.signed.mp4` (which contains h1, h2, and a reference to `proof.bin`) and the proof
-file itself.  The original video is not required for proof verification.
+The ZK proof is **self-contained in the edit manifest**.  A public verifier needs only
+`edited.signed.mp4` (which contains h1, h2, the gadget id, and an embedded copy of the
+capture manifest) plus `proof.bin`.  **The original video never needs to be published.**
 
-`capture.signed.mp4` exists for two other reasons:
+h1 is a hash — it reveals nothing about the original content.  A verifier learns: *whatever
+the original was, applying the declared gadget produces exactly this edited video, and
+nothing else was changed.*  This is the zero-knowledge property.
 
-- **Auditability.** It gives any investigator a cryptographic pointer to the original
-  footage.  h1 in its manifest lets them independently confirm they have the right file:
-  decode it, hash the raw pixels, compare to h1.  Without this file the proof still holds
-  mathematically but there is no C2PA-traceable path back to the original.
+**Concrete example — drone footage:**  a drone records criminal activity; the owner blurs
+faces with `prove-edit`; they publish only `edited.signed.mp4` + `proof.bin`; they keep
+`capture.signed.mp4` private.  Any verifier confirms the blur is the only change.  If ever
+subpoenaed, the owner can show the original to a court, which can verify h1 matches it.
 
-- **Architecture for Level 2+.** When h1 is eventually produced inside trusted camera
-  hardware (a TEE or secure silicon), the capture manifest is where the hardware attestation
-  lives.  The ingredient link in `edited.signed.mp4` then chains to that hardware-rooted h1.
-  In Level 0, this is scaffolding — see [_Capture levels_](#capture-levels--how-trustworthy-is-h1).
+`capture.signed.mp4` is therefore a **private evidence artefact**, not something that needs
+to be published alongside the proof.  Its manifest is embedded inside `edited.signed.mp4`
+so the C2PA signature chain validates without the original file.
+
+For Level 2+ hardware cameras, the capture manifest is where the hardware attestation
+(device certificate chain, TEE signature over h1) will live, making h1 itself
+hardware-rooted rather than software-computed.  In Level 0, h1 is software-computed
+scaffolding — see [_Capture levels_](#capture-levels--how-trustworthy-is-h1).
 
 `c2pa-sign` produces a completely different, simpler thing: a single signed file with only a
 `c2pa.actions` declaration and a BMFF hash.  It is not one of the two fightfake files.
