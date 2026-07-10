@@ -344,6 +344,96 @@ What the browser checks today: h1 consistency between the two assertions and SHA
 proof binary.  Cryptographic Groth16 verification (three pairing checks over BN254) is on the
 roadmap for a future WASM release.
 
+---
+
+## Verification trust model — can a website fake the green button?
+
+This is an important question.  A website showing a "✅ proof verified" badge can always
+lie — if the verification runs on the website's own server, or via JavaScript served by the
+same website, the site operator can return "valid" without checking anything.  The ZK proof
+is a mathematical object that cannot be forged, but **showing that the proof is valid
+requires running a verification algorithm, and that algorithm can be faked**.
+
+The trust hierarchy for verification, from weakest to strongest:
+
+### Level A — server-side verification (weakest)
+
+The website sends the proof to its own backend, which checks it and returns a result.
+Trust: you trust the website operator completely.  fightfake.ai saying "valid" is no
+different from fightfake.ai saying "I assert this is genuine" — you have no way to
+distinguish honest verification from a hardcoded response.
+
+### Level B — JavaScript served by the same website
+
+The website serves a JS bundle that runs the verifier in your browser.  This is better in
+one sense (the computation happens in your browser, not their server), but the same operator
+controls both the proof and the JS.  A compromised or dishonest fightfake.ai can serve JS
+that always returns `true`.
+
+### Level C — WASM with Subresource Integrity (SRI)
+
+The WASM verifier binary is loaded with an SRI hash pinned in the `<script>` tag:
+
+```html
+<script type="module"
+  src="https://cdn.fightfake.ai/fightfake_wasm.js"
+  integrity="sha384-<hash-of-wasm-binary>"
+  crossorigin="anonymous">
+</script>
+```
+
+The browser refuses to execute the script if the hash does not match.  The WASM binary is
+compiled deterministically from open-source code, so anyone can verify that the hash matches
+the source.  This means:
+- Even if fightfake.ai's CDN is compromised, the browser will reject a tampered binary.
+- The source code of the verifier is publicly auditable.
+- Trust is reduced to: "I trust that the SHA-384 pinned in the HTML is correct."
+
+This is the intended browser deployment model for fightfake.ai.
+
+### Level D — CLI verification (strongest, for technical users)
+
+Download the `fightfake` binary (or compile it from this repository) and run:
+
+```bash
+./fightfake verify \
+  --capture capture.signed.mp4 \
+  --edited  edited.signed.mp4 \
+  --proof   proof.bin
+```
+
+This is fully independent of fightfake.ai.  The verification algorithm is open source, can
+be audited, and compiled on any machine.  No network request is made.  This is the gold
+standard for anyone who wants to verify a proof without trusting the website at all.
+
+### Summary
+
+| Verification method | Trust required in fightfake.ai |
+|---|---|
+| Server-side check, result shown on page | Full trust |
+| JS bundle served by fightfake.ai | Full trust |
+| WASM with SRI hash pinned | Only that the HTML hash is correct |
+| CLI from open-source build | None — fully independent |
+
+**Practical recommendation:** for most users, WASM+SRI is the right trade-off — it is
+self-contained in the browser, the code is auditable, and the SRI hash prevents silent
+substitution.  Users who want to be fully independent of fightfake.ai can compile and run
+the CLI.  The website's green button is a convenience, not the security primitive — the
+security primitive is the proof file and the open-source verifier.
+
+**What WASM verification checks (current):**
+1. C2PA signature on both manifests is structurally valid.
+2. h1 in the capture assertion matches h1 in the edit-proof assertion.
+3. SHA-256 of `proof.bin` matches `proof_sha256` in the edit-proof assertion.
+
+**What WASM verification does not yet check:**
+- The Groth16 pairing equations over BN254 (the cryptographic heart of the ZK proof).
+  This is the roadmap item that will make the browser verification truly trustless.  Until
+  then, a stub proof (32 bytes of zeros) and a real proof look the same to the WASM verifier.
+
+The CLI will add cryptographic Groth16 verification (`verify-proof` command) in the same
+release as the full Eva backend.
+
 ### C2PA online validator
 
 The manifests produced by this toolkit are spec-conformant and can be uploaded to
