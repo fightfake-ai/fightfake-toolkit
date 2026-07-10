@@ -32,7 +32,7 @@ pub fn sign_capture_asset(
 ) -> Result<()> {
     let capture = read_capture_assertion(capture_assertion_path)?;
     let mut builder = Builder::from_json(
-        &json!({ "title": format!("FightFake capture: {}", capture.device_id) }).to_string(),
+        &json!({ "title": format!("fightfake capture: {}", capture.device_id) }).to_string(),
     )
     .context("failed to initialize capture C2PA builder")?;
 
@@ -91,7 +91,7 @@ pub fn sign_edit_asset(
         .unwrap_or("application/octet-stream");
 
     let mut builder =
-        Builder::from_json(&json!({ "title": "FightFake edit proof" }).to_string())
+        Builder::from_json(&json!({ "title": "fightfake edit proof" }).to_string())
             .context("failed to initialize edit C2PA builder")?;
 
     // Ingredient: link back to the signed capture asset.

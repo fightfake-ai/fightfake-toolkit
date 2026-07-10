@@ -10,7 +10,7 @@
                     "org.cai.c2pa_rs": "0.53.0"
                 }
             ],
-            "title": "FightFake capture: dev-0",
+            "title": "fightfake capture: dev-0",
             "format": "video/mp4",
             "instance_id": "xmp:iid:3a1f2619-46d3-4517-98ed-31bac308c76c",
             "ingredients": [],
@@ -102,7 +102,7 @@
                     "org.cai.c2pa_rs": "0.53.0"
                 }
             ],
-            "title": "FightFake edit proof",
+            "title": "fightfake edit proof",
             "format": "video/mp4",
             "instance_id": "xmp:iid:95a26e75-c4f8-487a-9290-33c167d73c20",
             "ingredients": [

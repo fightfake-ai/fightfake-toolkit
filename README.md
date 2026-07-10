@@ -1,7 +1,11 @@
 # fightfake-toolkit
 
 A toolkit for proving that a video edit is genuine — and for verifying that claim without
-trusting the editor.
+trusting the editor.  This is the open-source toolkit behind [fightfake.ai](https://fightfake.ai).
+
+**Naming:** *fightfake.ai* is the product; *fightfake-toolkit* is this repository; a
+*fightfake manifest* is a C2PA manifest with `org.zkedit.*` assertions; the CLI binary is
+`fightfake`.
 
 ---
 
@@ -20,7 +24,7 @@ trust that Adobe's signing pipeline was not compromised, that the signer's priva
 not misused, and that the description is accurate.  A deep-fake with a stolen or misleading
 certificate is indistinguishable from a legitimate edit.
 
-**fightfake-toolkit** closes that gap.  Instead of a declaration backed by institutional
+**fightfake-toolkit** closes that gap for [fightfake.ai](https://fightfake.ai).  Instead of a declaration backed by institutional
 trust, it produces a **mathematical proof** — a compact blob of bytes that any verifier can
 check independently, without trusting the signer, without access to the original footage, and
 without any knowledge of who produced the video.  The proof shows that a specific pixel-level
@@ -30,7 +34,7 @@ way, the proof does not verify.
 
 In short:
 - **Standard C2PA:** *"Trust me — I declare this is what was edited."*
-- **fightfake:** *"Don't trust me — verify it yourself. The math guarantees it."*
+- **fightfake.ai:** *"Don't trust me — verify it yourself. The math guarantees it."*
 
 ---
 
@@ -375,7 +379,7 @@ that extends the standard with pixel fingerprints and a ZK proof.
   --action c2pa.color_adjustments \
   --description "Brightness adjustment"
 
-# Fightfake C2PA — additionally proves, mathematically, that ONLY this brightness edit
+# fightfake C2PA — additionally proves, mathematically, that ONLY this brightness edit
 # was made and that no other pixel was changed
 ./target/release/fightfake prove-edit \
   --input  testdata/videos/input/my-video.mp4 \
@@ -401,7 +405,7 @@ for the full sequence diagram.
 
 ### What's inside each manifest
 
-| Assertion | Standard C2PA (`c2pa-sign`) | Fightfake C2PA (`prove-edit`) |
+| Assertion | Standard C2PA (`c2pa-sign`) | fightfake C2PA (`prove-edit`) |
 |---|---|---|
 | `c2pa.hash.bmff.v3` (hard binding) | ✅ auto-added | ✅ auto-added |
 | `c2pa.actions` (edit description) | ✅ human-readable | ✅ human-readable |
@@ -412,7 +416,7 @@ for the full sequence diagram.
 
 ### What each approach can (and cannot) prove
 
-| Claim | Standard C2PA | Fightfake C2PA |
+| Claim | Standard C2PA | fightfake C2PA |
 |---|---|---|
 | "This file hasn't been modified since signing" | ✅ hard binding | ✅ hard binding |
 | "This video came from a specific camera/device" | ✅ (if camera has C2PA support) | ✅ |
@@ -428,7 +432,7 @@ chains to a trusted CA, then accept the signer's declaration.  If the signer's k
 compromised, or if the pipeline that produces the declaration is manipulated, you have no way
 to detect it.
 
-Fightfake eliminates that trust dependency.  The ZK proof is a mathematical object: if it
+fightfake.ai eliminates that trust dependency.  The ZK proof is a mathematical object: if it
 verifies, the declared edit is the only pixel-level change, period — regardless of who
 signed the file, whether their certificate is trusted, or whether their infrastructure was
 compromised.

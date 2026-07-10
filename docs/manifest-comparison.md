@@ -5,6 +5,10 @@ stores it, and shows annotated, side-by-side examples of a **standard C2PA
 manifest** (produced by `c2pa-sign`) and the two **fightfake manifests**
 (produced by `prove-edit`).
 
+**Naming:** *fightfake.ai* is the product; *fightfake-toolkit* is the repository;
+a *fightfake manifest* is a C2PA manifest with `org.zkedit.*` assertions; the
+CLI binary is `fightfake`.
+
 The example JSON files in this directory were generated from
 `bank-robbery-original.mp4` (1920×1072 after auto-crop, 121 frames, 5 s clip)
 and can be regenerated at any time:
@@ -19,7 +23,7 @@ and can be regenerated at any time:
   --input out/standard-signed.mp4 | python3 -m json.tool \
   > docs/example-standard-c2pa-manifest.json
 
-# Fightfake (capture + edit)
+# fightfake (capture + edit)
 ./target/release/fightfake prove-edit \
   --input testdata/videos/input/bank-robbery-original.mp4 --out-dir out/
 ./target/release/fightfake dump-manifest \
@@ -102,7 +106,7 @@ The manifest has **no reference to the original file**.  It records only:
 So standard C2PA proves **forward integrity** from the moment of signing ("this
 file has not been tampered with since I signed it"), not **backward provenance**
 ("this file came from that specific original, and only the declared edit was
-applied").  That backward link is what fightfake adds via h1, h2, ingredients,
+applied").  That backward link is what fightfake.ai adds via h1, h2, ingredients,
 and the ZK proof.
 
 ---
@@ -182,7 +186,7 @@ File: [`example-standard-c2pa-manifest.json`](example-standard-c2pa-manifest.jso
 
 ---
 
-## Fightfake manifests — annotated
+## fightfake manifests — annotated
 
 `prove-edit` takes one input video and produces two output MP4 files:
 
@@ -259,7 +263,7 @@ File: [`example-fightfake-capture-manifest.json`](example-fightfake-capture-mani
   "manifests": {
     "urn:uuid:4f8d135e-…": {
 
-      "title": "FightFake capture: dev-0",
+      "title": "fightfake capture: dev-0",
 
       "ingredients": [],     // root — no parent
 
@@ -315,7 +319,7 @@ File: [`example-fightfake-edit-manifest.json`](example-fightfake-edit-manifest.j
     // ── Active (edit) manifest ────────────────────────────────────────────────
     "urn:uuid:e6bbee29-…": {
 
-      "title": "FightFake edit proof",
+      "title": "fightfake edit proof",
 
       // ── Ingredient link ───────────────────────────────────────────────────
       // Points back to the capture manifest by UUID.  c2pa-rs validates that
@@ -385,7 +389,7 @@ File: [`example-fightfake-edit-manifest.json`](example-fightfake-edit-manifest.j
 
 ## Side-by-side summary
 
-| Field | Standard C2PA | Fightfake capture | Fightfake edit |
+| Field | Standard C2PA | fightfake capture | fightfake edit |
 |---|---|---|---|
 | `ingredients` | empty | empty | capture manifest (by UUID) |
 | `c2pa.actions` | declared edit | auto-crop disclosure | declared edit |
