@@ -75,6 +75,36 @@ H.264 container bytes.  This is fast (~0.07 s for 4 MB) but says nothing about
 what the pixels look like; it only says the encoded file has not changed since
 signing.
 
+### When the hash is computed (standard C2PA)
+
+In a normal C2PA workflow, the BMFF hash is computed over the **output file** —
+the video as it exists *after* the declared edit has already been applied.  The
+manifest is created and embedded at the end of the editing process:
+
+```
+original.mp4
+    │
+    ▼  editor applies brightness adjustment
+edited.mp4              ← c2pa.hash.bmff is computed over these bytes
+    │
+    ▼  c2pa-rs signs and injects manifest into uuid box
+edited.signed.mp4
+  ├── uuid: { c2pa.actions: "brightness edit",
+  │           c2pa.hash.bmff: SHA-256(edited container bytes) }
+  ├── mdat: H.264 encoded edited frames
+  └── moov: metadata
+```
+
+The manifest has **no reference to the original file**.  It records only:
+1. a human-readable declaration of what was done (`c2pa.actions`), and
+2. a hash of the edited encoded container (`c2pa.hash.bmff.v2`).
+
+So standard C2PA proves **forward integrity** from the moment of signing ("this
+file has not been tampered with since I signed it"), not **backward provenance**
+("this file came from that specific original, and only the declared edit was
+applied").  That backward link is what fightfake adds via h1, h2, ingredients,
+and the ZK proof.
+
 ---
 
 ## Standard C2PA manifest — annotated
@@ -144,18 +174,36 @@ File: [`example-standard-c2pa-manifest.json`](example-standard-c2pa-manifest.jso
 ```
 
 **What this tells a verifier:**
-- The file has not been modified since it was signed (hard binding).
+- The file has not been modified since it was signed (hard binding over the **post-edit** bytes).
 - Someone with the private key matching the certificate declared a brightness edit.
-- **What it cannot tell:** whether the pixels actually differ from some original in
-  any specific way, or whether the edit is the only change that was made.
+- **What it cannot tell:** what the original looked like, whether the declared edit is the
+  only change that was made, or whether this file is even related to any particular source
+  asset (there is no ingredient link and no pixel fingerprint of an original).
 
 ---
 
 ## Fightfake manifests — annotated
 
 `prove-edit` produces **two signed MP4 files**, each with its own embedded manifest.
-The edit manifest additionally carries the capture manifest as an ingredient, forming
-a cryptographic chain: `original → capture-signed → edit-signed`.
+The edit manifest carries the capture manifest as an ingredient, forming a cryptographic
+chain: `original → capture-signed → edit-signed`.
+
+**Why two files?**  A single C2PA manifest can only hard-bind the file it is embedded in
+(`c2pa.hash.bmff` hashes the container bytes of that specific file).  The proof needs to
+bind two different things at once: the original encoded bytes (to anchor h1) and the edited
+encoded bytes (to anchor h2 and the proof).  Two separate signed files, one per asset, is
+the natural C2PA way to express this:
+
+- `capture.signed.mp4` — original video, manifest contains h1 + BMFF hash of the original.
+  Acts as a notarised original: verifiers confirm this file's bytes match h1.
+- `edited.signed.mp4` — edited video, manifest contains h2 + ZK proof reference + a C2PA
+  ingredient link pointing back to `capture.signed.mp4` by its manifest UUID.
+
+C2PA-aware tools follow the ingredient link automatically, validate both manifests, and
+present the full provenance chain.
+
+Note: `c2pa-sign` produces a completely different, simpler output — a single file with only
+a `c2pa.actions` declaration and a BMFF hash.  It is not one of the two fightfake files.
 
 ### Capture manifest (`capture.signed.mp4`)
 
@@ -173,20 +221,11 @@ File: [`example-fightfake-capture-manifest.json`](example-fightfake-capture-mani
 
       "assertions": [
 
-        // ── 1. c2pa.actions — auto-crop disclosure ────────────────────────────
-        // If the video needed cropping to reach 16-pixel alignment, it is
-        // recorded here so verifiers know h1 covers the cropped frame.
-        {
-          "label": "c2pa.actions.v2",
-          "data": {
-            "actions": [{
-              "action": "c2pa.cropped",
-              "parameters": {
-                "description": "Auto-cropped 1920×1080 → 1920×1072 …"
-              }
-            }]
-          }
-        },
+        // ── 1. c2pa.actions ──────────────────────────────────────────────────
+        // Optional.  Present only when the toolkit did something worth
+        // declaring about the original before signing (currently unused —
+        // the toolkit requires pre-aligned input and performs no implicit edits).
+        // Omitted in the current example.
 
         // ── 2. org.zkedit.capture ─────────────────────────────────────────────
         // fightfake-specific.  Records the pixel fingerprint of the original

@@ -193,18 +193,39 @@ edited macroblocks
   │ untile macroblocks → planar YUV → ffmpeg: re-encode to H.264
   ▼
 out/edited.mp4
-out/capture.signed.mp4    ← C2PA manifest: h1 + device ID + hard binding
-out/edited.signed.mp4     ← C2PA manifest: h2 + proof reference + ingredient chain
+out/capture.signed.mp4    ← C2PA manifest: h1 + device ID + BMFF hard binding on original
+out/edited.signed.mp4     ← C2PA manifest: h2 + proof reference + ingredient link → capture
 out/proof.bin             ← ZK proof (or 32-byte stub in stub build)
 ```
 
-**Auto-crop and h1 coverage:** Eva's IVC circuit requires video dimensions that are exact
-multiples of 16 pixels.  Most cameras (including the 1920×1080 example above) produce
-non-aligned dimensions — 1080 is not divisible by 16.  The toolkit automatically crops to
-the largest aligned size: 1920×1072 in this case (8 rows removed from the bottom edge, no
-pixel resampling).  This crop is recorded as a `c2pa.actions / c2pa.cropped` assertion in
-the capture manifest, so any C2PA viewer knows h1 covers the cropped frame, not the
-original full-resolution frame.  Verifiers must apply the same crop before computing h1.
+**Why two signed MP4 files?**  The ZK proof needs to link three things together: the
+original video, the edit declaration, and the proof that the edit is the only pixel-level
+change.  A single file cannot hold this because the C2PA hard binding (`c2pa.hash.bmff`)
+can only cover the bytes of the file it is embedded in — it cannot simultaneously bind the
+original and the edited container.
+
+`capture.signed.mp4` is the original video with a manifest asserting h1 (the pixel
+fingerprint of the original) and a BMFF hash of the original's encoded bytes.  It acts as a
+notarised original: anyone can verify that this specific encoded file was the input and that
+h1 was computed from it.
+
+`edited.signed.mp4` is the edited video with a manifest asserting h2 (the pixel fingerprint
+of the edited frames), a reference to the ZK proof, and a C2PA ingredient link pointing back
+to `capture.signed.mp4` by its manifest UUID.  The ingredient link causes C2PA-aware tools
+to fetch, validate, and display the full chain from original to edit.
+
+`c2pa-sign` produces a different, simpler thing: a single signed file with only a
+`c2pa.actions` declaration and a BMFF hash — no pixel fingerprints and no proof.  It is not
+one of the two fightfake files; the two fightfake files are both produced exclusively by
+`prove-edit`.
+
+**16-pixel alignment requirement:** Eva's IVC circuit works on 16×16 macroblocks, so both
+width and height must be exact multiples of 16.  The toolkit enforces this and exits with
+a clear error and an ffmpeg command if your video does not meet the requirement.  Many
+common resolutions already satisfy it (e.g. 1920×1072, 1280×720, 1280×960); many others
+do not (e.g. 1920×1080 — 1080 ÷ 16 = 67.5).  See
+[_16-pixel alignment_](#16-pixel-alignment--why-and-future-options) below for the
+reasoning and future options.
 
 **Why macroblocks?**  Eva's IVC circuit processes video one 16×16 pixel block at a time.
 Each IVC step proves that the edit gadget was applied correctly to one (or more) macroblocks
@@ -364,6 +385,14 @@ supported: standard C2PA is a **declaration** backed by the signer's identity an
 certificate; fightfake adds a **cryptographic proof** that verifiers can check independently
 of who signed it.
 
+**When the hash is computed:** in standard C2PA, edits are applied first; the BMFF hash is
+then computed over the **output file** (the post-edit encoded MP4 bytes), and only then is
+the manifest signed and embedded.  The manifest has no reference to the original — it
+records the declared action plus a fingerprint of the edited file.  Standard C2PA therefore
+proves forward integrity from signing onward, not that the declared edit is the only change
+from a specific original.  See [`docs/manifest-comparison.md`](docs/manifest-comparison.md)
+for the full sequence diagram.
+
 ### What's inside each manifest
 
 | Assertion | Standard C2PA (`c2pa-sign`) | Fightfake C2PA (`prove-edit`) |
@@ -442,7 +471,10 @@ bank-robbery clip (~4 MB encoded), this takes ~0.07 s on an M1 Mac.  The ECDSA-P
 signature over the resulting hash is computationally negligible.
 
 The C2PA signature says: *"the encoded container bytes have not changed since signing."*
-It says nothing about what the pixels look like or what transformations were applied.
+It says nothing about what the pixels look like, what the original was, or what
+transformations were applied before signing.  In a typical editor workflow, those bytes are
+already the **post-edit** file: the edit happens first, then c2pa-rs hashes the result and
+attaches the manifest.
 
 ### Why this is fast — and what VerITAS is actually about
 
@@ -720,12 +752,62 @@ fightfake-toolkit/
 
 ---
 
+## 16-pixel alignment — why and future options
+
+Eva's IVC circuit operates on 16×16 pixel macroblocks.  Both the width and height of the
+input video must be exact multiples of 16, or the tiling step cannot partition the frame
+evenly and the ZK circuit cannot be constructed.
+
+**Current policy:** `prove-edit` rejects non-aligned videos with an error and prints the
+exact `ffmpeg` command to pre-crop.  You own the crop decision — the toolkit does not do it
+silently.  h1 therefore always covers exactly the pixels in the file you supply, with no
+hidden pre-processing.
+
+**Common aligned resolutions:** 1920×1072, 1920×1088, 1280×720, 1280×960, 640×480, 854×480.
+**Common non-aligned:** 1920×1080 (1080 ÷ 16 = 67.5), 3840×2160 (2160 ÷ 16 = 135 — aligned!),
+1280×1024 (aligned), 1920×1200 (not aligned).
+
+**Pre-crop with ffmpeg:**
+
+```bash
+# Crop bottom 8 rows to go from 1920×1080 → 1920×1072
+ffmpeg -i input.mp4 -vf crop=1920:1072:0:0 -c:v libx264 -crf 18 input-cropped.mp4
+./target/release/fightfake prove-edit --input input-cropped.mp4 --out-dir out/
+```
+
+**Open question: how should a production system handle non-aligned captures?**
+
+This is a genuine unsolved design question.  The options are:
+
+1. **Require aligned capture.**  Configure the camera to output a natively aligned
+   resolution (e.g. 1920×1072 instead of 1920×1080).  Many cameras allow this.  h1 covers
+   the full frame, no pixels are lost.  This is the cleanest option for new hardware.
+
+2. **Provable padding.**  Extend the frame to the next aligned size by adding rows/columns
+   of a known value (e.g. zero/black).  Eva's circuit would need a padding gadget to
+   verify this, but the extension is lossless and provable.  The C2PA manifest declares
+   the padding dimensions; verifiers strip the padding before displaying.
+
+3. **Provable crop inside the circuit.**  Add a crop gadget that proves exactly which
+   pixels were removed (and that only edge pixels were removed).  This keeps h1 covering
+   the original full frame while making the alignment adjustment verifiable.
+
+4. **Accept the limitation for now.**  For the current use case — post-capture editing on
+   existing recordings — pre-cropping with ffmpeg is a reasonable manual step.  For
+   real-time camera capture (Levels 2–3), the camera firmware should simply output aligned
+   dimensions natively.
+
+The toolkit currently implements option 4 with explicit user control.  Options 1 and 2 are
+the most likely paths forward for production deployments.
+
+---
+
 ## Roadmap
 
 - [ ] Cryptographic Groth16 verification in the CLI (`verify-proof` command)
 - [ ] WASM Groth16 verifier — `verifyGroth16Proof` for in-browser proof checking
 - [ ] Level 1 Raspberry Pi demonstrator (`docs/level1-pi-demonstrator.md`)
-- [ ] Crop gadget support
+- [ ] Crop/padding gadget to handle non-16-aligned captures provably (see above)
 - [ ] Proof serialisation format and public key distribution specification
 - [ ] fightfake.ai integration guide for web developers
 

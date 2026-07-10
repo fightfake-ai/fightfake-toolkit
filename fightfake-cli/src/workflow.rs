@@ -119,21 +119,24 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
     );
 
     // Eva's IVC circuit works on 16×16 macroblocks — both dimensions must be
-    // multiples of 16.  Automatically crop to the largest aligned size.
-    // This removes at most 15 pixels from the bottom and right edges only; no
-    // pixel values are resampled.
-    let width  = (orig_w / 16) * 16;
-    let height = (orig_h / 16) * 16;
-    let crop_info = if width != orig_w || height != orig_h {
-        println!(
-            "[workflow] note: auto-cropping {orig_w}×{orig_h} → {width}×{height} \
-             ({} col(s) and {} row(s) removed from the bottom-right edge; \
-             Eva requires multiples of 16; h1 covers the cropped frame only)",
-            orig_w - width,
-            orig_h - height,
+    // multiples of 16.  We require the caller to pre-crop rather than doing it
+    // silently, because h1 must cover exactly the pixels in the supplied file
+    // and any implicit crop would make that relationship opaque.
+    let width  = orig_w;
+    let height = orig_h;
+    if orig_w % 16 != 0 || orig_h % 16 != 0 {
+        let cw = (orig_w / 16) * 16;
+        let ch = (orig_h / 16) * 16;
+        anyhow::bail!(
+            "video dimensions {orig_w}×{orig_h} are not multiples of 16.\n\
+             Eva's ZK circuit requires both width and height to be exact multiples of 16.\n\
+             Pre-crop with ffmpeg before running prove-edit:\n\n\
+             \x20 ffmpeg -i {:?} -vf crop={cw}:{ch}:0:0 -c:v libx264 -crf 18 cropped.mp4\n\n\
+             Then pass cropped.mp4 to prove-edit.",
+            cfg.input
         );
-        Some(CropInfo { orig_width: orig_w, orig_height: orig_h, cropped_width: width, cropped_height: height })
-    } else {
+    }
+    let crop_info = {
         None
     };
 
