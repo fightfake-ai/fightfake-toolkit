@@ -1,0 +1,136 @@
+{
+    "active_manifest": "urn:uuid:4f8d135e-714c-41f6-903f-c26eb1cd3a75",
+    "manifests": {
+        "urn:uuid:4f8d135e-714c-41f6-903f-c26eb1cd3a75": {
+            "claim_generator": "c2pa-rs/0.53.0",
+            "claim_generator_info": [
+                {
+                    "name": "c2pa-rs",
+                    "version": "0.53.0",
+                    "org.cai.c2pa_rs": "0.53.0"
+                }
+            ],
+            "title": "FightFake capture: dev-0",
+            "format": "video/mp4",
+            "instance_id": "xmp:iid:3a1f2619-46d3-4517-98ed-31bac308c76c",
+            "ingredients": [],
+            "assertions": [
+                {
+                    "label": "c2pa.actions.v2",
+                    "data": {
+                        "actions": [
+                            {
+                                "action": "c2pa.cropped",
+                                "softwareAgent": {
+                                    "name": "fightfake-toolkit",
+                                    "version": "0.1.0"
+                                },
+                                "parameters": {
+                                    "description": "Auto-cropped 1920\u00d71080 \u2192 1920\u00d71072 to satisfy 16-pixel macroblock alignment required by the ZK prover. h1 fingerprint covers the cropped frame only."
+                                }
+                            }
+                        ]
+                    }
+                },
+                {
+                    "label": "org.zkedit.capture",
+                    "data": {
+                        "h1": "66508738fcc1fabf01372b26a591b0559442db06b3822277430b11c774c20dc5",
+                        "version": 1,
+                        "device_id": "dev-0",
+                        "assertion_type": "org.zkedit.capture.v1",
+                        "hash_algorithm": "griffin",
+                        "pipeline_stage": "post_isp"
+                    }
+                },
+                {
+                    "label": "c2pa.hash.bmff.v2",
+                    "data": {
+                        "exclusions": [
+                            {
+                                "xpath": "/uuid",
+                                "length": null,
+                                "data": [
+                                    {
+                                        "offset": 8,
+                                        "value": "2P7D1hsOSDySl1goh37EgQ=="
+                                    }
+                                ],
+                                "subset": null,
+                                "version": null,
+                                "flags": null,
+                                "exact": null
+                            },
+                            {
+                                "xpath": "/ftyp",
+                                "length": null,
+                                "data": null,
+                                "subset": null,
+                                "version": null,
+                                "flags": null,
+                                "exact": null
+                            },
+                            {
+                                "xpath": "/mfra",
+                                "length": null,
+                                "data": null,
+                                "subset": null,
+                                "version": null,
+                                "flags": null,
+                                "exact": null
+                            }
+                        ],
+                        "alg": "sha256",
+                        "hash": "BxMYFBDKZIKJFxbQ1CfEbLZUJMzBtvu2dcdOYDkyHOM=",
+                        "name": "jumbf manifest"
+                    }
+                }
+            ],
+            "signature_info": {
+                "alg": "Es256",
+                "issuer": "fightfake-toolkit",
+                "cert_serial_number": "454365452091495713351460382794004456902649902446"
+            },
+            "label": "urn:uuid:4f8d135e-714c-41f6-903f-c26eb1cd3a75"
+        }
+    },
+    "validation_results": {
+        "activeManifest": {
+            "success": [
+                {
+                    "code": "claimSignature.insideValidity",
+                    "url": "self#jumbf=/c2pa/urn:uuid:4f8d135e-714c-41f6-903f-c26eb1cd3a75/c2pa.signature",
+                    "explanation": "claim signature valid"
+                },
+                {
+                    "code": "claimSignature.validated",
+                    "url": "self#jumbf=/c2pa/urn:uuid:4f8d135e-714c-41f6-903f-c26eb1cd3a75/c2pa.signature",
+                    "explanation": "claim signature valid"
+                },
+                {
+                    "code": "assertion.hashedURI.match",
+                    "url": "self#jumbf=/c2pa/urn:uuid:4f8d135e-714c-41f6-903f-c26eb1cd3a75/c2pa.assertions/c2pa.actions.v2",
+                    "explanation": "hashed uri matched: self#jumbf=c2pa.assertions/c2pa.actions.v2"
+                },
+                {
+                    "code": "assertion.hashedURI.match",
+                    "url": "self#jumbf=/c2pa/urn:uuid:4f8d135e-714c-41f6-903f-c26eb1cd3a75/c2pa.assertions/org.zkedit.capture",
+                    "explanation": "hashed uri matched: self#jumbf=c2pa.assertions/org.zkedit.capture"
+                },
+                {
+                    "code": "assertion.hashedURI.match",
+                    "url": "self#jumbf=/c2pa/urn:uuid:4f8d135e-714c-41f6-903f-c26eb1cd3a75/c2pa.assertions/c2pa.hash.bmff.v2",
+                    "explanation": "hashed uri matched: self#jumbf=c2pa.assertions/c2pa.hash.bmff.v2"
+                },
+                {
+                    "code": "assertion.bmffHash.match",
+                    "url": "self#jumbf=/c2pa/urn:uuid:4f8d135e-714c-41f6-903f-c26eb1cd3a75/c2pa.assertions/c2pa.hash.bmff.v2",
+                    "explanation": "data hash valid"
+                }
+            ],
+            "informational": [],
+            "failure": []
+        }
+    },
+    "validation_state": "Valid"
+}

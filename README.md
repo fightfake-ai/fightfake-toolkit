@@ -225,7 +225,7 @@ it is for an attacker to substitute a different recording before h1 is computed.
 
 **Timing:** at the end of the run a table is printed showing time per phase.  Below are
 real measurements on `bank-robbery-original.mp4` (1920×1072 after auto-crop, 121 frames,
-5 s clip), averaged over 3 runs on an Apple M2 MacBook Pro (stub build, no ZK proof):
+5 s clip), averaged over 3 runs on an Apple M1 MacBook Pro (stub build, no ZK proof):
 
 ```
 ┌─────────────────────────────────────────┬──────────┐
@@ -244,20 +244,19 @@ real measurements on `bank-robbery-original.mp4` (1920×1072 after auto-crop, 12
 
 † Raw YUV data for 121 frames at 1920×1072: ~374 MB.  The 2.26 s includes a brightness
 multiply per luma byte plus SHA-256 over the resulting data — effective throughput ≈ 165 MB/s.
-With the Eva backend, Griffin replaces SHA-256; Griffin is circuit-friendly but roughly 3–5×
-slower as a plain hash.
+With the Eva backend, Griffin replaces SHA-256 for h1/h2; see below for why.
 
 ‡ C2PA signing covers the encoded H.264 file (≈4 MB), not raw pixels.  See the
 [C2PA signing section](#how-c2pa-rs-signs-the-video) for details.
 
-To reproduce these numbers on your machine:
+Measured on an Apple M1 MacBook Pro.  To reproduce on your machine:
 
 ```bash
 ./bench.sh testdata/videos/input/bank-robbery-original.mp4 3
 ```
 
 With `--features eva-backend`, the "ZK proving" row dominates and typically takes
-several minutes for a 5-second 1920×1072 clip on an M2 Mac.
+several minutes for a 5-second 1920×1072 clip on an M1 Mac.
 
 ### Step 3 — verify an edit proof
 
@@ -411,86 +410,105 @@ Understanding this matters for evaluating performance claims and for comparing w
 approach in academic papers such as
 [VerITAS (eprint.iacr.org/2024/1066)](https://eprint.iacr.org/2024/1066.pdf).
 
+### Where the manifest lives — BMFF box structure
+
+An MP4 file is a sequence of **boxes** (also called atoms), each with a 4-byte type code
+and a length.  c2pa-rs injects the manifest into a `uuid` box identified by a
+C2PA-registered UUID:
+
+```
+bank-robbery-original.mp4  (unsigned)        standard-signed.mp4  (after c2pa-sign)
+┌──────────────────────┐                     ┌──────────────────────┐
+│  ftyp  (file type)   │                     │  ftyp                │
+├──────────────────────┤                     ├──────────────────────┤
+│  mdat  (H.264 data)  │  ──► c2pa-sign ──►  │  uuid  ◄─────────────┼── C2PA manifest
+│  ~4.4 MB             │                     │  ~5 KB               │   (JUMBF container:
+├──────────────────────┤                     ├──────────────────────┤    assertions +
+│  moov  (metadata)    │                     │  mdat  (unchanged)   │    claim +
+│  ~120 KB             │                     ├──────────────────────┤    COSE_Sign1)
+└──────────────────────┘                     │  moov  (unchanged)   │
+                                             └──────────────────────┘
+```
+
 ### What c2pa-rs actually hashes
 
-C2PA's hard binding for MP4 files is called **`c2pa.hash.bmff.v2`** (or `.v3` in newer
-versions).  It works at the *container level*, not the pixel level:
+The `c2pa.hash.bmff.v2` assertion records a SHA-256 digest of every box **except**:
+- the `uuid` box holding the manifest itself (chicken-and-egg: the manifest cannot
+  hash itself before it exists),
+- `ftyp` and `mfra` (excluded by convention in the BMFF hash spec).
 
-```
-MP4 file (BMFF boxes)
-  ├── ftyp box   ──► included in hash input
-  ├── moov box   ──► included (video metadata, codec parameters, …)
-  ├── mdat box   ──► included (the H.264 encoded bitstream)
-  └── uuid box   ──► EXCLUDED (this is where the C2PA manifest lives)
-```
+This hashes the **encoded H.264 bytes** — not raw decoded pixels.  For the
+bank-robbery clip (~4 MB encoded), this takes ~0.07 s on an M1 Mac.  The ECDSA-P256
+signature over the resulting hash is computationally negligible.
 
-The library identifies each BMFF box by type, skips the uuid box that holds the manifest
-itself (to avoid a chicken-and-egg problem), and runs **SHA-256 over the remaining byte
-ranges** in one pass.  The result is a list of `(byte_offset, length, sha256_digest)` tuples
-stored in the manifest.
-
-Crucially, this is a hash of the **encoded H.264 bytes**, not raw decoded pixels.  For the
-bank-robbery clip (~4 MB encoded), this takes ~0.07 s.  The ECDSA-P256 signature over the
-resulting hash digest is computationally negligible.
+The C2PA signature says: *"the encoded container bytes have not changed since signing."*
+It says nothing about what the pixels look like or what transformations were applied.
 
 ### Why this is fast — and what VerITAS is actually about
 
 The [VerITAS paper](https://eprint.iacr.org/2024/1066.pdf) observes that hashing raw pixel
-data *inside a zero-knowledge circuit* is extremely expensive.  A ZK circuit that verifies
-SHA-256 requires thousands of arithmetic constraints per block (64 bytes), making it
-impractical for multi-megapixel images.  They propose a lattice-based hash that is circuit-
-friendly to work around this.
+data *inside a zero-knowledge circuit* is extremely expensive.  The root cause is that SHA-256
+uses bitwise operations (XOR, AND, rotate) which are cheap on real hardware but very costly
+to express in arithmetic circuits (which work over a prime field, not over bits):
 
-C2PA does **not** operate inside a ZK circuit.  It hashes bytes on real hardware with a
-native SHA-256 implementation (single-instruction on x86/ARM), so there is no circuit
-overhead.  The C2PA signature simply says "the encoded container bytes have not changed since
-signing" — it says nothing about what the pixels look like or what transformations were
-applied.
+- SHA-256 over one 64-byte block ≈ **30 000 R1CS constraints** (must decompose 32-bit
+  words into bits to simulate XOR/AND)
+- One 1920×1072 frame of raw YUV ≈ 2 MB → ~32 000 SHA-256 blocks → **~1 billion constraints per frame**
+- 121 frames → ~100 billion constraints — completely impractical for a ZK prover
 
-fightfake's h1/h2 fingerprints are where the VerITAS concern is relevant:
+VerITAS addresses this with a lattice-based hash that stays cheap inside their proof system.
 
-| Hash | Where computed | Purpose | Cost |
+C2PA does **not** operate inside a ZK circuit at all, so it never faces this problem.
+
+### Griffin: Eva's solution for circuit-friendly pixel hashing
+
+Eva uses the [Griffin permutation](https://eprint.iacr.org/2022/403) for h1/h2 instead of
+SHA-256.  Griffin is an algebraic hash designed to be efficient *inside* prime-field
+arithmetic circuits:
+
+- Operates natively over field elements — no bit decomposition needed
+- Each Griffin permutation (16 elements, 5 rounds) costs roughly **200–300 R1CS constraints**
+- SHA-256 in a circuit costs ~30 000 constraints per 64-byte block
+- Poseidon (another ZK-friendly hash) costs ~220 constraints per permutation — similar to Griffin
+
+**Is proving Griffin faster than proving SHA-256?  Yes — dramatically.**  For a 374 MB
+raw YUV input (121 frames at 1920×1072), the constraint count with Griffin is roughly
+**100–500× lower** than with SHA-256.  Griffin is slower than SHA-256 as a plain hash on
+real hardware (no SIMD acceleration), but the ZK proving cost — which is what dominates
+total run time — is orders of magnitude lower, making the proof feasible in minutes
+rather than days.
+
+| Hash | Where computed | Approx. constraints / block | Purpose |
 |---|---|---|---|
-| `c2pa.hash.bmff` | outside ZK, native SHA-256 | container integrity | fast (~0.07 s / 4 MB) |
-| h1, h2 (stub build) | outside ZK, native SHA-256 | pixel fingerprints | ~2.3 s / 374 MB raw |
-| h1, h2 (Eva backend) | **inside ZK circuit**, Griffin | pixel fingerprints + provable | slower hash, but ZK-friendly |
+| `c2pa.hash.bmff` | outside ZK, native SHA-256 | n/a | container integrity |
+| h1, h2 (stub build) | outside ZK, native SHA-256 | n/a | pixel fingerprints, not ZK-provable |
+| h1, h2 (Eva backend) | **inside ZK circuit**, Griffin | ~200–300 | pixel fingerprints, ZK-provable |
+| SHA-256 in ZK (hypothetical) | inside ZK circuit | ~30 000 | would make proving infeasible |
 
-Eva avoids the VerITAS problem by using the
-[Griffin permutation](https://eprint.iacr.org/2022/403) instead of SHA-256 for h1/h2.
-Griffin is specifically designed so that verifying it inside an arithmetic circuit is
-cheap — far cheaper than SHA-256.  The stub build uses plain SHA-256 for h1/h2 because it
-never runs a ZK prover; only the Eva backend needs the circuit-friendly variant.
+The stub build uses plain SHA-256 because it never runs a ZK prover.  Only the Eva backend
+needs the circuit-friendly variant.
 
 ### Comparing manifests: `dump-manifest`
 
-The C2PA manifest is embedded inside the MP4 in a `uuid` BMFF box — there is no separate
-manifest file by default.  Use `dump-manifest` to extract and inspect it:
+The manifest is embedded inside the MP4 `uuid` box — there is no separate file unless you
+extract it.  Annotated real examples are in
+[`docs/manifest-comparison.md`](docs/manifest-comparison.md) with the JSON files alongside:
 
 ```bash
-# What does a standard C2PA manifest look like?
-./target/release/fightfake c2pa-sign \
-  --input  testdata/videos/input/bank-robbery-original.mp4 \
-  --output out/standard.mp4
-./target/release/fightfake dump-manifest --input out/standard.mp4 > out/standard.manifest.json
+./target/release/fightfake dump-manifest --input out/capture.signed.mp4 | python3 -m json.tool
+./target/release/fightfake dump-manifest --input out/edited.signed.mp4  | python3 -m json.tool
 
-# What does a fightfake manifest look like?
-./target/release/fightfake prove-edit \
-  --input  testdata/videos/input/bank-robbery-original.mp4 \
-  --out-dir out/
-./target/release/fightfake dump-manifest --input out/capture.signed.mp4  > out/capture.manifest.json
-./target/release/fightfake dump-manifest --input out/edited.signed.mp4   > out/edited.manifest.json
-
-# Diff them side-by-side
-diff <(python3 -m json.tool out/standard.manifest.json) \
-     <(python3 -m json.tool out/edited.manifest.json)
+# Diff standard vs. fightfake
+diff \
+  <(./target/release/fightfake dump-manifest --input out/standard-signed.mp4 | python3 -m json.tool) \
+  <(./target/release/fightfake dump-manifest --input out/edited.signed.mp4   | python3 -m json.tool)
 ```
 
-The key differences you will see in the fightfake edit manifest vs. standard C2PA:
-
-- An `ingredients` entry linking back to the signed capture asset (with its own manifest hash).
-- An `org.zkedit.capture` assertion containing `h1` (the pixel fingerprint of the original).
-- An `org.zkedit.edit_proof` assertion containing `h2`, `proof_sha256`, and the proof-system metadata.
-- The standard C2PA manifest has only `c2pa.actions` and the BMFF hash.
+Key differences visible in the diff:
+- fightfake edit manifest has a non-empty `ingredients` list linking to the capture manifest.
+- `org.zkedit.capture` assertion (h1, device_id, pipeline_stage) — absent in standard C2PA.
+- `org.zkedit.edit_proof` assertion (h2, proof_sha256, gadget_id) — absent in standard C2PA.
+- Standard C2PA has only `c2pa.actions` + `c2pa.hash.bmff.v2`.
 
 ---
 
@@ -516,7 +534,7 @@ Without `--features eva-backend` (Level 0), the proof is a 32-byte placeholder. 
 hashes, and C2PA manifests are real and can be used for integration testing.
 
 With `--features eva-backend` (Level 1), a full Nova IVC + Groth16 proof is generated.
-Expect ~5 min for a 10-second 352×288 clip on an M2 Mac; longer for higher resolutions.
+Expect ~5 min for a 10-second 352×288 clip on an M1 Mac; longer for higher resolutions.
 
 ```bash
 # Level 0 — fast, for integration testing

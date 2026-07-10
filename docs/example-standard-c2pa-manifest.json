@@ -1,0 +1,120 @@
+{
+    "active_manifest": "urn:uuid:30fced02-c400-4f3d-9cd7-f8ace8530fc5",
+    "manifests": {
+        "urn:uuid:30fced02-c400-4f3d-9cd7-f8ace8530fc5": {
+            "claim_generator": "c2pa-rs/0.53.0",
+            "claim_generator_info": [
+                {
+                    "name": "c2pa-rs",
+                    "version": "0.53.0",
+                    "org.cai.c2pa_rs": "0.53.0"
+                }
+            ],
+            "title": "C2PA-signed video",
+            "format": "video/mp4",
+            "instance_id": "xmp:iid:486de79c-8a24-4ef9-adc3-601d523a0359",
+            "ingredients": [],
+            "assertions": [
+                {
+                    "label": "c2pa.actions.v2",
+                    "data": {
+                        "actions": [
+                            {
+                                "action": "c2pa.color_adjustments",
+                                "softwareAgent": {
+                                    "name": "fightfake-toolkit",
+                                    "version": "0.1.0"
+                                },
+                                "parameters": {
+                                    "description": "Brightness adjustment"
+                                }
+                            }
+                        ]
+                    }
+                },
+                {
+                    "label": "c2pa.hash.bmff.v2",
+                    "data": {
+                        "exclusions": [
+                            {
+                                "xpath": "/uuid",
+                                "length": null,
+                                "data": [
+                                    {
+                                        "offset": 8,
+                                        "value": "2P7D1hsOSDySl1goh37EgQ=="
+                                    }
+                                ],
+                                "subset": null,
+                                "version": null,
+                                "flags": null,
+                                "exact": null
+                            },
+                            {
+                                "xpath": "/ftyp",
+                                "length": null,
+                                "data": null,
+                                "subset": null,
+                                "version": null,
+                                "flags": null,
+                                "exact": null
+                            },
+                            {
+                                "xpath": "/mfra",
+                                "length": null,
+                                "data": null,
+                                "subset": null,
+                                "version": null,
+                                "flags": null,
+                                "exact": null
+                            }
+                        ],
+                        "alg": "sha256",
+                        "hash": "cJxTnQN0/NYa5CPFfFGumE7AxwJfTHyrsOKg4VVQgN8=",
+                        "name": "jumbf manifest"
+                    }
+                }
+            ],
+            "signature_info": {
+                "alg": "Es256",
+                "issuer": "fightfake-toolkit",
+                "cert_serial_number": "454365452091495713351460382794004456902649902446"
+            },
+            "label": "urn:uuid:30fced02-c400-4f3d-9cd7-f8ace8530fc5"
+        }
+    },
+    "validation_results": {
+        "activeManifest": {
+            "success": [
+                {
+                    "code": "claimSignature.insideValidity",
+                    "url": "self#jumbf=/c2pa/urn:uuid:30fced02-c400-4f3d-9cd7-f8ace8530fc5/c2pa.signature",
+                    "explanation": "claim signature valid"
+                },
+                {
+                    "code": "claimSignature.validated",
+                    "url": "self#jumbf=/c2pa/urn:uuid:30fced02-c400-4f3d-9cd7-f8ace8530fc5/c2pa.signature",
+                    "explanation": "claim signature valid"
+                },
+                {
+                    "code": "assertion.hashedURI.match",
+                    "url": "self#jumbf=/c2pa/urn:uuid:30fced02-c400-4f3d-9cd7-f8ace8530fc5/c2pa.assertions/c2pa.actions.v2",
+                    "explanation": "hashed uri matched: self#jumbf=c2pa.assertions/c2pa.actions.v2"
+                },
+                {
+                    "code": "assertion.hashedURI.match",
+                    "url": "self#jumbf=/c2pa/urn:uuid:30fced02-c400-4f3d-9cd7-f8ace8530fc5/c2pa.assertions/c2pa.hash.bmff.v2",
+                    "explanation": "hashed uri matched: self#jumbf=c2pa.assertions/c2pa.hash.bmff.v2"
+                },
+                {
+                    "code": "assertion.bmffHash.match",
+                    "url": "self#jumbf=/c2pa/urn:uuid:30fced02-c400-4f3d-9cd7-f8ace8530fc5/c2pa.assertions/c2pa.hash.bmff.v2",
+                    "explanation": "data hash valid"
+                }
+            ],
+            "informational": [],
+            "failure": []
+        }
+    },
+    "validation_state": "Valid"
+}
