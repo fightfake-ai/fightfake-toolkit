@@ -430,12 +430,10 @@ standard for anyone who wants to verify a proof without trusting the website at 
 it.  The security primitive is the proof file and the open-source verifier running under
 the user's control.
 
-**For most non-technical users:** the fightfake.ai/verify page (Level C) is the practical
-answer — no installation required, verification runs locally in their browser.
-
-**For seamless automatic verification on any site:** the browser extension (Level D) is the
-right long-term answer — install once, works everywhere, independent of page operators.  The
-existing C2PA browser extension from CAI is the model.
+**For most non-technical users:** the browser extension (Level D) is the practical answer —
+install once from the extension store, then just browse normally.  No extra steps on any
+individual page.  The fightfake.ai/verify page (Level C) requires manually downloading and
+uploading proof files, which is more friction than installing an extension.
 
 **For full independence from fightfake.ai:** compile and run the CLI (Level E).
 
