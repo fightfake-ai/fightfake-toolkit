@@ -198,26 +198,26 @@ out/edited.signed.mp4     ← C2PA manifest: h2 + proof reference + ingredient l
 out/proof.bin             ← ZK proof (or 32-byte stub in stub build)
 ```
 
-**Why two signed MP4 files?**  The ZK proof needs to link three things together: the
-original video, the edit declaration, and the proof that the edit is the only pixel-level
-change.  A single file cannot hold this because the C2PA hard binding (`c2pa.hash.bmff`)
-can only cover the bytes of the file it is embedded in — it cannot simultaneously bind the
-original and the edited container.
+**Why two signed MP4 files?**
 
-`capture.signed.mp4` is the original video with a manifest asserting h1 (the pixel
-fingerprint of the original) and a BMFF hash of the original's encoded bytes.  It acts as a
-notarised original: anyone can verify that this specific encoded file was the input and that
-h1 was computed from it.
+The ZK proof is **self-contained in the edit manifest**.  To verify it you only need
+`edited.signed.mp4` (which contains h1, h2, and a reference to `proof.bin`) and the proof
+file itself.  The original video is not required for proof verification.
 
-`edited.signed.mp4` is the edited video with a manifest asserting h2 (the pixel fingerprint
-of the edited frames), a reference to the ZK proof, and a C2PA ingredient link pointing back
-to `capture.signed.mp4` by its manifest UUID.  The ingredient link causes C2PA-aware tools
-to fetch, validate, and display the full chain from original to edit.
+`capture.signed.mp4` exists for two other reasons:
 
-`c2pa-sign` produces a different, simpler thing: a single signed file with only a
-`c2pa.actions` declaration and a BMFF hash — no pixel fingerprints and no proof.  It is not
-one of the two fightfake files; the two fightfake files are both produced exclusively by
-`prove-edit`.
+- **Auditability.** It gives any investigator a cryptographic pointer to the original
+  footage.  h1 in its manifest lets them independently confirm they have the right file:
+  decode it, hash the raw pixels, compare to h1.  Without this file the proof still holds
+  mathematically but there is no C2PA-traceable path back to the original.
+
+- **Architecture for Level 2+.** When h1 is eventually produced inside trusted camera
+  hardware (a TEE or secure silicon), the capture manifest is where the hardware attestation
+  lives.  The ingredient link in `edited.signed.mp4` then chains to that hardware-rooted h1.
+  In Level 0, this is scaffolding — see [_Capture levels_](#capture-levels--how-trustworthy-is-h1).
+
+`c2pa-sign` produces a completely different, simpler thing: a single signed file with only a
+`c2pa.actions` declaration and a BMFF hash.  It is not one of the two fightfake files.
 
 **16-pixel alignment requirement:** Eva's IVC circuit works on 16×16 macroblocks, so both
 width and height must be exact multiples of 16.  The toolkit enforces this and exits with

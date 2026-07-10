@@ -188,19 +188,36 @@ File: [`example-standard-c2pa-manifest.json`](example-standard-c2pa-manifest.jso
 The edit manifest carries the capture manifest as an ingredient, forming a cryptographic
 chain: `original → capture-signed → edit-signed`.
 
-**Why two files?**  A single C2PA manifest can only hard-bind the file it is embedded in
-(`c2pa.hash.bmff` hashes the container bytes of that specific file).  The proof needs to
-bind two different things at once: the original encoded bytes (to anchor h1) and the edited
-encoded bytes (to anchor h2 and the proof).  Two separate signed files, one per asset, is
-the natural C2PA way to express this:
+**Why two files?**
 
-- `capture.signed.mp4` — original video, manifest contains h1 + BMFF hash of the original.
-  Acts as a notarised original: verifiers confirm this file's bytes match h1.
-- `edited.signed.mp4` — edited video, manifest contains h2 + ZK proof reference + a C2PA
-  ingredient link pointing back to `capture.signed.mp4` by its manifest UUID.
+First, the important clarification: the ZK proof is **self-contained in the edit manifest**.
+To verify the proof, you only need:
+- h1 and h2 (both in `edited.signed.mp4`'s manifest)
+- `proof.bin`
+- knowledge of which gadget was applied
 
-C2PA-aware tools follow the ingredient link automatically, validate both manifests, and
-present the full provenance chain.
+The original video (`capture.signed.mp4`) is **not needed for proof verification**.
+
+So why does `capture.signed.mp4` exist at all?  Two reasons:
+
+1. **Auditability / discoverability.**  If a journalist or investigator wants to trace back
+   to the original footage, the C2PA ingredient link gives them a cryptographic pointer to a
+   signed artifact they can retrieve and verify independently.  h1 lets them confirm they
+   have the right file (decode it, hash the pixels, compare to h1 in the edit manifest).
+   Without the capture file the proof still verifies mathematically — but there is no
+   C2PA-traceable path back to the original.
+
+2. **Architecture for Level 2+.**  When h1 is eventually computed inside trusted camera
+   hardware (a TEE or secure element — see the capture levels section in the README), the
+   capture manifest is where the hardware attestation lives: a device certificate chain, a
+   TEE signature over h1, etc.  The edit manifest's ingredient link then chains to that
+   hardware-attested h1 rather than a software-computed one.
+
+   In Level 0, this is scaffolding only.  The same software that runs the edit also computed
+   h1, so the capture file adds no cryptographic security — a malicious actor could fabricate
+   any h1 they like, compute a valid proof for h1→h2, and produce two valid-looking signed
+   files.  The capture level (0→3) is what determines how hard it is to forge h1, not the
+   presence of a signed capture file itself.
 
 Note: `c2pa-sign` produces a completely different, simpler output — a single file with only
 a `c2pa.actions` declaration and a BMFF hash.  It is not one of the two fightfake files.
