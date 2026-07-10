@@ -401,6 +401,66 @@ Trust model: you trust fightfake.ai's extension code, which you installed from t
 store.  The extension store (Google/Mozilla) applies its own review and code-signing, so the
 trust chain is: Google/Mozilla → fightfake.ai → the code running in your browser.
 
+#### How the browser extension shows a badge on the video
+
+The extension does **not** modify the video file or the site's video player.  It injects a
+small HTML overlay into the page — the same technique the existing C2PA browser extension
+uses for its "Content Credentials" indicator.
+
+A browser extension has two parts:
+
+1. **Background / service worker** — runs in the extension's own context.  Holds the WASM
+   verifier, fetches `proof.bin`, runs Groth16 checks.  Not controlled by the page.
+2. **Content script** — JavaScript injected into pages the user visits (e.g. proofdrop.ai).
+   Finds `<video>` elements, asks the background worker to verify, then paints a badge.
+
+Typical flow on proofdrop.ai:
+
+```
+User visits article page (normal browsing — no extra steps)
+    │
+    ▼
+Content script runs on the page
+    │  finds <video> elements
+    │  reads C2PA manifest from the MP4 (same-origin) or from a linked proof URL
+    ▼
+Background worker verifies
+    │  extracts org.zkedit.* assertions
+    │  fetches proof.bin
+    │  runs Groth16 verification (WASM bundled in the extension)
+    ▼
+Content script injects a badge
+    │  creates a <div> positioned over the video corner
+    │  e.g. "✅ Verified edit — blur only"
+    │  updates position on scroll/resize
+    ▼
+User sees badge on the video — proofdrop.ai did not serve this UI
+```
+
+The badge is ordinary HTML/CSS added to the page DOM, positioned with `position: absolute`
+relative to the video's bounding box.  It is not inside the player's native controls — it
+floats on top, like a subtitle overlay.
+
+**What works well:**
+
+| Scenario | Extension can verify and badge? |
+|---|---|
+| `<video src="article-video.mp4">` on the same site | ✅ Yes — file is readable, manifest extractable |
+| Video linked via a same-origin `proof.bin` URL | ✅ Yes |
+| Any page after one-time install | ✅ Automatic — user just browses normally |
+
+**What is harder or impossible:**
+
+| Scenario | Problem |
+|---|---|
+| YouTube / Vimeo embed | Video runs in a third-party iframe; file bytes usually not accessible |
+| Cross-origin iframe without permission | Extension may not be able to read the video element |
+| User has not installed the extension | No badge — any on-page badge is only as trustworthy as the site |
+
+Until a fightfake.ai extension ships, users rely on Level C (verify page) or Level E (CLI).
+The existing C2PA extension already demonstrates the overlay pattern for standard C2PA
+signatures and hard bindings.
+
 ### Level E — CLI verification (strongest, for technical users)
 
 Download the `fightfake` binary (or compile it from this repository) and run:
