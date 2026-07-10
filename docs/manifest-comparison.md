@@ -232,8 +232,14 @@ the same software that runs the edit also computed h1, so a malicious actor coul
 any h1 they like.  The capture level (0→3) determines how hard it is to forge h1 — see the
 README for details.
 
-Note: `c2pa-sign` produces a completely different, simpler output — a single file with only
-a `c2pa.actions` declaration and a BMFF hash.  It is not one of the two fightfake files.
+**Is the capture manifest the same as what `c2pa-sign` would produce on the original?  No.**
+`c2pa-sign` records only a human-readable action declaration (`c2pa.actions`) and a BMFF
+hard binding over the encoded container bytes — it has no knowledge of pixels.  The capture
+manifest omits `c2pa.actions` but adds `org.zkedit.capture` with **h1**, the pixel
+fingerprint.  h1 is what ties the original video into the ZK proof chain: the edit manifest
+references the same h1, and the proof certifies that applying the gadget to pixels(h1)
+produces pixels(h2).  Without h1 in the capture manifest there is nothing for the proof to
+anchor to.
 
 ### Capture manifest (`capture.signed.mp4`)
 
