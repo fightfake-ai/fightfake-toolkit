@@ -129,7 +129,8 @@ confirming they belong together.  The corresponding **private key** is kept secr
 used to produce signatures.
 
 C2PA requires every manifest to carry a **COSE_Sign1** signature — a compact binary
-envelope (defined in [RFC 8152](https://www.rfc-editor.org/rfc/rfc8152)) that bundles:
+envelope (defined in [RFC 9052](https://www.rfc-editor.org/rfc/rfc9052), which superseded
+the now-obsolete RFC 8152) that bundles:
 
 1. The **signed payload** — a hash of all the assertions in the manifest.
 2. The **algorithm** — ES256 (ECDSA P-256 with SHA-256).
@@ -222,25 +223,41 @@ h1 from an existing recording; Level 3 means silicon-level hardware produced it.
 proof is cryptographically sound regardless of the level — the level only tells you how hard
 it is for an attacker to substitute a different recording before h1 is computed.
 
-**Timing:** at the end of the run a table is printed showing time per phase:
+**Timing:** at the end of the run a table is printed showing time per phase.  Below are
+real measurements on `bank-robbery-original.mp4` (1920×1072 after auto-crop, 121 frames,
+5 s clip), averaged over 3 runs on an Apple M2 MacBook Pro (stub build, no ZK proof):
 
 ```
 ┌─────────────────────────────────────────┬──────────┐
-│ Phase                                   │     Time │
+│ Phase                                   │      Avg │
 ├─────────────────────────────────────────┼──────────┤
-│ ffmpeg decode                           │   0.43s  │
-│ macroblock tiling                       │   0.02s  │
-│ edit + hashing (h1, h2)                 │   0.11s  │
-│ ZK proving (Nova IVC + Groth16)         │   0.00s  │   ← Level 0 stub
-│ ffmpeg re-encode                        │   0.38s  │
-│ C2PA signing                            │   0.14s  │
+│ ffmpeg decode                           │   0.34s  │
+│ macroblock tiling                       │   0.03s  │
+│ edit + hashing (h1, h2)  †             │   2.26s  │
+│ ZK proving (Nova IVC + Groth16)         │   0.00s  │  ← stub; real ≈ minutes
+│ ffmpeg re-encode                        │   2.68s  │
+│ C2PA signing             ‡             │   0.07s  │
 ├─────────────────────────────────────────┼──────────┤
-│ Total                                   │   1.08s  │
+│ Total                                   │   5.69s  │
 └─────────────────────────────────────────┴──────────┘
 ```
 
-With Level 1 (`--features eva-backend`), the "ZK proving" row dominates and typically takes
-several minutes for a short clip on an M-series Mac.
+† Raw YUV data for 121 frames at 1920×1072: ~374 MB.  The 2.26 s includes a brightness
+multiply per luma byte plus SHA-256 over the resulting data — effective throughput ≈ 165 MB/s.
+With the Eva backend, Griffin replaces SHA-256; Griffin is circuit-friendly but roughly 3–5×
+slower as a plain hash.
+
+‡ C2PA signing covers the encoded H.264 file (≈4 MB), not raw pixels.  See the
+[C2PA signing section](#how-c2pa-rs-signs-the-video) for details.
+
+To reproduce these numbers on your machine:
+
+```bash
+./bench.sh testdata/videos/input/bank-robbery-original.mp4 3
+```
+
+With `--features eva-backend`, the "ZK proving" row dominates and typically takes
+several minutes for a 5-second 1920×1072 clip on an M2 Mac.
 
 ### Step 3 — verify an edit proof
 
@@ -388,6 +405,95 @@ assertion and noting the `org.zkedit.*` assertions as custom extensions.
 
 ---
 
+## How c2pa-rs signs the video
+
+Understanding this matters for evaluating performance claims and for comparing with the
+approach in academic papers such as
+[VerITAS (eprint.iacr.org/2024/1066)](https://eprint.iacr.org/2024/1066.pdf).
+
+### What c2pa-rs actually hashes
+
+C2PA's hard binding for MP4 files is called **`c2pa.hash.bmff.v2`** (or `.v3` in newer
+versions).  It works at the *container level*, not the pixel level:
+
+```
+MP4 file (BMFF boxes)
+  ├── ftyp box   ──► included in hash input
+  ├── moov box   ──► included (video metadata, codec parameters, …)
+  ├── mdat box   ──► included (the H.264 encoded bitstream)
+  └── uuid box   ──► EXCLUDED (this is where the C2PA manifest lives)
+```
+
+The library identifies each BMFF box by type, skips the uuid box that holds the manifest
+itself (to avoid a chicken-and-egg problem), and runs **SHA-256 over the remaining byte
+ranges** in one pass.  The result is a list of `(byte_offset, length, sha256_digest)` tuples
+stored in the manifest.
+
+Crucially, this is a hash of the **encoded H.264 bytes**, not raw decoded pixels.  For the
+bank-robbery clip (~4 MB encoded), this takes ~0.07 s.  The ECDSA-P256 signature over the
+resulting hash digest is computationally negligible.
+
+### Why this is fast — and what VerITAS is actually about
+
+The [VerITAS paper](https://eprint.iacr.org/2024/1066.pdf) observes that hashing raw pixel
+data *inside a zero-knowledge circuit* is extremely expensive.  A ZK circuit that verifies
+SHA-256 requires thousands of arithmetic constraints per block (64 bytes), making it
+impractical for multi-megapixel images.  They propose a lattice-based hash that is circuit-
+friendly to work around this.
+
+C2PA does **not** operate inside a ZK circuit.  It hashes bytes on real hardware with a
+native SHA-256 implementation (single-instruction on x86/ARM), so there is no circuit
+overhead.  The C2PA signature simply says "the encoded container bytes have not changed since
+signing" — it says nothing about what the pixels look like or what transformations were
+applied.
+
+fightfake's h1/h2 fingerprints are where the VerITAS concern is relevant:
+
+| Hash | Where computed | Purpose | Cost |
+|---|---|---|---|
+| `c2pa.hash.bmff` | outside ZK, native SHA-256 | container integrity | fast (~0.07 s / 4 MB) |
+| h1, h2 (stub build) | outside ZK, native SHA-256 | pixel fingerprints | ~2.3 s / 374 MB raw |
+| h1, h2 (Eva backend) | **inside ZK circuit**, Griffin | pixel fingerprints + provable | slower hash, but ZK-friendly |
+
+Eva avoids the VerITAS problem by using the
+[Griffin permutation](https://eprint.iacr.org/2022/403) instead of SHA-256 for h1/h2.
+Griffin is specifically designed so that verifying it inside an arithmetic circuit is
+cheap — far cheaper than SHA-256.  The stub build uses plain SHA-256 for h1/h2 because it
+never runs a ZK prover; only the Eva backend needs the circuit-friendly variant.
+
+### Comparing manifests: `dump-manifest`
+
+The C2PA manifest is embedded inside the MP4 in a `uuid` BMFF box — there is no separate
+manifest file by default.  Use `dump-manifest` to extract and inspect it:
+
+```bash
+# What does a standard C2PA manifest look like?
+./target/release/fightfake c2pa-sign \
+  --input  testdata/videos/input/bank-robbery-original.mp4 \
+  --output out/standard.mp4
+./target/release/fightfake dump-manifest --input out/standard.mp4 > out/standard.manifest.json
+
+# What does a fightfake manifest look like?
+./target/release/fightfake prove-edit \
+  --input  testdata/videos/input/bank-robbery-original.mp4 \
+  --out-dir out/
+./target/release/fightfake dump-manifest --input out/capture.signed.mp4  > out/capture.manifest.json
+./target/release/fightfake dump-manifest --input out/edited.signed.mp4   > out/edited.manifest.json
+
+# Diff them side-by-side
+diff <(python3 -m json.tool out/standard.manifest.json) \
+     <(python3 -m json.tool out/edited.manifest.json)
+```
+
+The key differences you will see in the fightfake edit manifest vs. standard C2PA:
+
+- An `ingredients` entry linking back to the signed capture asset (with its own manifest hash).
+- An `org.zkedit.capture` assertion containing `h1` (the pixel fingerprint of the original).
+- An `org.zkedit.edit_proof` assertion containing `h2`, `proof_sha256`, and the proof-system metadata.
+- The standard C2PA manifest has only `c2pa.actions` and the BMFF hash.
+
+---
+
 ## Commands reference
 
 ### `prove-edit` — full fightfake workflow
@@ -468,10 +574,23 @@ fightfake make-test-cert [--out-dir <DIR>]
 Generates a self-signed P-256 / ES256 certificate suitable for local testing.  Writes
 `signer-cert.pem` and `signer-key.pem`.  Do not use in production.
 
+### `dump-manifest` — inspect the embedded C2PA manifest
+
+```
+fightfake dump-manifest --input <FILE> [--out <FILE>]
+```
+
+Extracts the C2PA manifest from a signed MP4 and prints it as formatted JSON (to stdout or a
+file).  The manifest lives inside the MP4 container in a `uuid` BMFF box — there is no
+separate file unless you explicitly extract it with this command.  Use it to compare standard
+C2PA and fightfake manifests side-by-side (see the
+[comparing manifests](#comparing-manifests-dump-manifest) section above).
+
 ### Low-level plumbing commands
 
 | Command | What it does |
 |---|---|
+| `dump-manifest` | Extract the embedded C2PA manifest from a signed MP4 as JSON |
 | `emit-capture` | Write an `org.zkedit.capture.v1` JSON without signing |
 | `emit-edit-proof` | Write an `org.zkedit.edit_proof.v1` JSON without signing |
 | `sign-capture-manifest` | C2PA-sign a video and embed a capture assertion |

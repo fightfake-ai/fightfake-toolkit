@@ -8,6 +8,7 @@ mod workflow;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use c2pa::Reader;
 use clap::{Parser, Subcommand, ValueEnum};
 use fightfake_core::assertions::{
     CaptureAssertionV1, EditProofAssertionV1, CAPTURE_ASSERTION_TYPE, EDIT_PROOF_ASSERTION_TYPE,
@@ -103,6 +104,21 @@ enum Command {
         /// Proof binary file.
         #[arg(long)]
         proof: PathBuf,
+    },
+
+    /// Print the C2PA manifest embedded in a signed MP4 as formatted JSON.
+    ///
+    /// The manifest is stored inside the MP4 container (in a 'C2PA' BMFF box),
+    /// not as a separate file.  This command extracts and pretty-prints it so you
+    /// can inspect and compare manifests from `c2pa-sign` and `prove-edit`.
+    DumpManifest {
+        /// The signed MP4 to inspect.
+        #[arg(long, short)]
+        input: PathBuf,
+
+        /// Write JSON to this file instead of stdout.
+        #[arg(long, short)]
+        out: Option<PathBuf>,
     },
 
     // ── Low-level plumbing commands ─────────────────────────────────────────
@@ -443,6 +459,20 @@ fn main() -> Result<()> {
 
         Command::MakeTestCert { out_dir } => {
             generate_test_cert(&out_dir)?;
+        }
+
+        Command::DumpManifest { input, out } => {
+            let reader = Reader::from_file(&input)
+                .with_context(|| format!("failed to read C2PA from {}", input.display()))?;
+            let json = reader.json();
+            match out {
+                Some(path) => {
+                    std::fs::write(&path, json.as_bytes())
+                        .with_context(|| format!("failed to write {}", path.display()))?;
+                    println!("{}", path.display());
+                }
+                None => println!("{json}"),
+            }
         }
 
         Command::PrintPiCaptureContract => {
