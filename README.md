@@ -370,26 +370,31 @@ one sense (the computation happens in your browser, not their server), but the s
 controls both the proof and the JS.  A compromised or dishonest fightfake.ai can serve JS
 that always returns `true`.
 
-### Level C — WASM with Subresource Integrity (SRI)
+### Level C — browser extension (trustless in-browser verification)
 
-The WASM verifier binary is loaded with an SRI hash pinned in the `<script>` tag:
+A browser extension is installed by the user, not served by any website.  It runs
+independently of the page and cannot be overridden by the page operator.
 
-```html
-<script type="module"
-  src="https://cdn.fightfake.ai/fightfake_wasm.js"
-  integrity="sha384-<hash-of-wasm-binary>"
-  crossorigin="anonymous">
-</script>
-```
+Consider the proofdrop.ai scenario: a journalist site publishes an article with a video
+and a proof.  The page operator (proofdrop.ai) controls all the HTML, JS, and any WASM
+loaded by that page.  Even if the WASM is fetched from fightfake.ai's CDN with an SRI
+hash, proofdrop.ai controls the HTML that contains that hash — they can put any hash they
+like, pointing to any WASM they like.  **SRI protects against CDN compromise; it does not
+protect against a dishonest page operator.**
 
-The browser refuses to execute the script if the hash does not match.  The WASM binary is
-compiled deterministically from open-source code, so anyone can verify that the hash matches
-the source.  This means:
-- Even if fightfake.ai's CDN is compromised, the browser will reject a tampered binary.
-- The source code of the verifier is publicly auditable.
-- Trust is reduced to: "I trust that the SHA-384 pinned in the HTML is correct."
+A browser extension breaks this dependency.  The extension:
+1. Detects C2PA manifests embedded in videos on any page it visits.
+2. Extracts the `org.zkedit.*` assertions and the proof reference.
+3. Fetches `proof.bin` independently.
+4. Runs the Groth16 verification using its own bundled WASM — code the user installed,
+   not code served by proofdrop.ai.
+5. Shows a verification badge that proofdrop.ai cannot spoof.
 
-This is the intended browser deployment model for fightfake.ai.
+The [C2PA browser extension](https://contentauthenticity.org/get-started) from the Content
+Authenticity Initiative already does steps 1–2 and 5 for standard C2PA (signature + hard
+binding).  fightfake.ai needs to extend this — or build a companion extension — to add
+steps 3–4 (proof fetching and Groth16 verification).  This is the correct trustless
+browser model and is on the roadmap.
 
 ### Level D — CLI verification (strongest, for technical users)
 
@@ -408,18 +413,26 @@ standard for anyone who wants to verify a proof without trusting the website at 
 
 ### Summary
 
-| Verification method | Trust required in fightfake.ai |
-|---|---|
-| Server-side check, result shown on page | Full trust |
-| JS bundle served by fightfake.ai | Full trust |
-| WASM with SRI hash pinned | Only that the HTML hash is correct |
-| CLI from open-source build | None — fully independent |
+| Verification method | Who controls the verifier code | Trust required in website |
+|---|---|---|
+| Server-side check, badge on page | Website server | Full trust |
+| JS/WASM served by the page | Page operator | Full trust |
+| WASM on a CDN with SRI pinned in page HTML | Page operator controls the hash | Full trust (SRI only stops CDN tampering, not dishonest page operator) |
+| **Browser extension** | **User — installed independently** | **None** |
+| **CLI from open-source build** | **User — compiled locally** | **None** |
 
-**Practical recommendation:** for most users, WASM+SRI is the right trade-off — it is
-self-contained in the browser, the code is auditable, and the SRI hash prevents silent
-substitution.  Users who want to be fully independent of fightfake.ai can compile and run
-the CLI.  The website's green button is a convenience, not the security primitive — the
-security primitive is the proof file and the open-source verifier.
+**The website's green button is a convenience, not a security primitive.**  A website can
+always fake it.  The security primitive is the proof file and the open-source verifier
+running under the user's control — either as a browser extension or as the CLI.
+
+**Practical deployment:**
+- fightfake.ai's own website can show a badge using its own server-side check — this is
+  fine because fightfake.ai produced the proof system and the badge is just a UX nicety.
+- Third-party sites like proofdrop.ai should either link to a downloadable proof bundle
+  for CLI verification, or rely on a fightfake.ai browser extension that users install once
+  and that then works on any site.
+- The browser extension is the correct long-term answer for trustless in-browser
+  verification across any website.
 
 **What WASM verification checks (current):**
 1. C2PA signature on both manifests is structurally valid.
