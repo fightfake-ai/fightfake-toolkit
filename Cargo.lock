@@ -1568,6 +1568,7 @@ dependencies = [
  "folding-schemes",
  "hex",
  "mime_guess",
+ "ndarray",
  "rand 0.8.6",
  "rayon",
  "rcgen",
