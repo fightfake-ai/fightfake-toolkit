@@ -12,7 +12,7 @@
 //! Eva macroblocks (orig_*_enc)
 //!   ├──► Griffin hash chain ──► h1
 //!   │
-//!   │ apply edit gadget (brightness / grayscale / invert)
+//!   │ apply edit gadget (brightness / grayscale / invert / redact)
 //!   ▼
 //! Edited macroblocks
 //!   ├──► Griffin hash chain ──► h2
@@ -43,7 +43,7 @@ use fightfake_core::assertions::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::c2pa_signer::{sign_capture_asset, sign_edit_asset, CropInfo, SignMaterial};
+use crate::c2pa_signer::{sign_capture_asset, sign_edit_asset, SignMaterial};
 use crate::ffmpeg::{ffmpeg_decode_to_yuv, ffmpeg_encode_from_yuv, probe_video};
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -76,6 +76,22 @@ pub enum Gadget {
     Grayscale,
     /// Invert all channels: pixel = 255 − pixel.
     Invert,
+    /// Redact (blackout) a fixed pixel rectangle, only for a limited frame range.
+    ///
+    /// `[x, x+w) × [y, y+h)` is overwritten with `fill_y` (luma) and neutral
+    /// chroma (128) for frames `[frame_start, frame_end)`.  All other pixels
+    /// and all other frames are left byte-for-byte unchanged.  This is the
+    /// right primitive for e.g. blurring/blacking out one face for a couple
+    /// of seconds without editing (or having to prove) the rest of the clip.
+    Redact {
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        frame_start: usize,
+        frame_end: usize,
+        fill_y: u8,
+    },
 }
 
 impl Gadget {
@@ -84,6 +100,23 @@ impl Gadget {
             Gadget::Brightness { .. } => "brightness",
             Gadget::Grayscale => "grayscale",
             Gadget::Invert => "invert",
+            Gadget::Redact { .. } => "redact",
+        }
+    }
+
+    /// Gadget-specific parameters to embed in the edit-proof assertion, so a
+    /// verifier can see exactly what was edited without re-running anything.
+    pub fn params_json(&self) -> Option<serde_json::Value> {
+        match self {
+            Gadget::Brightness { scale } => Some(serde_json::json!({ "scale": scale })),
+            Gadget::Grayscale | Gadget::Invert => None,
+            Gadget::Redact { x, y, w, h, frame_start, frame_end, fill_y } => {
+                Some(serde_json::json!({
+                    "x": x, "y": y, "w": w, "h": h,
+                    "frame_start": frame_start, "frame_end": frame_end,
+                    "fill_y": fill_y,
+                }))
+            }
         }
     }
 }
@@ -214,6 +247,7 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
         h2: h2_hex.clone(),
         proof_sha256,
         proof_size_bytes: proof_bytes.len() as u64,
+        gadget_params: cfg.gadget.params_json(),
     };
 
     let capture_assertion_json = out("capture.assertion.json");
@@ -295,14 +329,25 @@ fn split_yuv(
     }
     #[cfg(not(feature = "eva-backend"))]
     {
-        let _ = (width, height, num_frames);
-        let y_len = width * height * num_frames;
-        let uv_len = y_len / 4;
-        Ok((
-            yuv[..y_len].to_vec(),
-            yuv[y_len..y_len + uv_len].to_vec(),
-            yuv[y_len + uv_len..].to_vec(),
-        ))
+        // Raw ffmpeg rawvideo output is frame-sequential: each frame is
+        // [Y plane][U plane][V plane], then the next frame.  We de-interleave
+        // into three frame-sequential plane buffers (all Y planes back to
+        // back, then all U planes, then all V planes) so that per-frame,
+        // per-pixel addressing (needed by e.g. Gadget::Redact) is simple.
+        // assemble_yuv() below reverses this exactly.
+        let y_frame = width * height;
+        let uv_frame = y_frame / 4;
+        let frame_bytes = y_frame + 2 * uv_frame;
+        let mut y_all = Vec::with_capacity(y_frame * num_frames);
+        let mut u_all = Vec::with_capacity(uv_frame * num_frames);
+        let mut v_all = Vec::with_capacity(uv_frame * num_frames);
+        for f in 0..num_frames {
+            let base = f * frame_bytes;
+            y_all.extend_from_slice(&yuv[base..base + y_frame]);
+            u_all.extend_from_slice(&yuv[base + y_frame..base + y_frame + uv_frame]);
+            v_all.extend_from_slice(&yuv[base + y_frame + uv_frame..base + frame_bytes]);
+        }
+        Ok((y_all, u_all, v_all))
     }
 }
 
@@ -326,10 +371,17 @@ fn assemble_yuv(
     }
     #[cfg(not(feature = "eva-backend"))]
     {
-        let _ = (width, height, num_frames);
-        let mut out = y.to_vec();
-        out.extend_from_slice(u);
-        out.extend_from_slice(v);
+        // Reverses the de-interleaving in split_yuv(): re-interleave the
+        // three frame-sequential plane buffers back into ffmpeg's expected
+        // frame-sequential [Y][U][V] rawvideo layout.
+        let y_frame = width * height;
+        let uv_frame = y_frame / 4;
+        let mut out = Vec::with_capacity((y_frame + 2 * uv_frame) * num_frames);
+        for f in 0..num_frames {
+            out.extend_from_slice(&y[f * y_frame..(f + 1) * y_frame]);
+            out.extend_from_slice(&u[f * uv_frame..(f + 1) * uv_frame]);
+            out.extend_from_slice(&v[f * uv_frame..(f + 1) * uv_frame]);
+        }
         Ok(out)
     }
 }
@@ -376,6 +428,28 @@ fn apply_edit_and_hash(
             let h2 = sha256_hex(&ey, &eu, &ev);
             Ok((ey, eu, ev, h1, h2))
         }
+        Gadget::Redact { x, y, w, h, frame_start, frame_end, fill_y } => {
+            #[cfg(feature = "eva-backend")]
+            {
+                anyhow::bail!(
+                    "the redact gadget is not yet wired to the eva-backend ZK prover \
+                     (Eva's Masking/MaskCfg primitive supports it, but per-macroblock, \
+                     per-frame varying edit configs are not yet threaded through the \
+                     Nova IVC loop — see README's 16-pixel alignment / roadmap notes). \
+                     Run without --features eva-backend for a real edit + real hashes \
+                     with a stub proof."
+                );
+            }
+            #[cfg(not(feature = "eva-backend"))]
+            {
+                let (ey, eu, ev) = redact_native(
+                    orig_y, orig_u, orig_v, width, height, num_frames,
+                    *x, *y, *w, *h, *frame_start, *frame_end, *fill_y,
+                );
+                let h2 = sha256_hex(&ey, &eu, &ev);
+                Ok((ey, eu, ev, h1, h2))
+            }
+        }
     }
 }
 
@@ -397,6 +471,70 @@ fn grayscale_native(y: &[u8], u_len: usize, v_len: usize) -> (Vec<u8>, Vec<u8>, 
 fn invert_native(y: &[u8], u: &[u8], v: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let inv = |s: &[u8]| s.iter().map(|&p| 255 - p).collect::<Vec<_>>();
     (inv(y), inv(u), inv(v))
+}
+
+/// Redact: overwrite the pixel rectangle `[x, x+w) × [y, y+h)` with `fill_y`
+/// luma and neutral (128) chroma, only for frames `[frame_start, frame_end)`.
+/// Everything else — every other pixel, every other frame — is copied through
+/// byte-for-byte unchanged.  Requires frame-sequential planar `y`/`u`/`v`
+/// buffers, i.e. the output of `split_yuv` above.
+#[allow(clippy::too_many_arguments)]
+fn redact_native(
+    y: &[u8],
+    u: &[u8],
+    v: &[u8],
+    width: usize,
+    height: usize,
+    num_frames: usize,
+    x: usize,
+    y_off: usize,
+    w: usize,
+    h: usize,
+    frame_start: usize,
+    frame_end: usize,
+    fill_y: u8,
+) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let mut ey = y.to_vec();
+    let mut eu = u.to_vec();
+    let mut ev = v.to_vec();
+
+    let chroma_w = width / 2;
+    let chroma_h = height / 2;
+
+    // Clamp the rectangle to the frame bounds; clamp the frame range to the
+    // clip length.  Chroma (4:2:0) is subsampled 2×2, so the luma rectangle
+    // maps to a chroma rectangle at half the coordinates and half the size.
+    let x1 = x.min(width);
+    let y1 = y_off.min(height);
+    let x2 = (x + w).min(width);
+    let y2 = (y_off + h).min(height);
+    let cx1 = x1 / 2;
+    let cy1 = y1 / 2;
+    let cx2 = x2.div_ceil(2);
+    let cy2 = y2.div_ceil(2);
+    let f_end = frame_end.min(num_frames);
+
+    for f in frame_start.min(f_end)..f_end {
+        let y_base = f * width * height;
+        for row in y1..y2 {
+            let row_start = y_base + row * width;
+            for px in &mut ey[row_start + x1..row_start + x2] {
+                *px = fill_y;
+            }
+        }
+        let uv_base = f * chroma_w * chroma_h;
+        for row in cy1..cy2 {
+            let row_start = uv_base + row * chroma_w;
+            for px in &mut eu[row_start + cx1..row_start + cx2] {
+                *px = 128;
+            }
+            for px in &mut ev[row_start + cx1..row_start + cx2] {
+                *px = 128;
+            }
+        }
+    }
+
+    (ey, eu, ev)
 }
 
 // ── Proof generation ──────────────────────────────────────────────────────────
@@ -450,6 +588,10 @@ fn prove_with_eva(
         Gadget::Brightness { scale } => prove_nova_groth16_brightness(blocks, blocks_per_step, *scale),
         Gadget::Grayscale => prove_nova_groth16_grayscale(blocks, blocks_per_step),
         Gadget::Invert => prove_nova_groth16_invert(blocks, blocks_per_step),
+        Gadget::Redact { .. } => anyhow::bail!(
+            "the redact gadget is not yet wired to the eva-backend ZK prover; \
+             see README's 16-pixel alignment / roadmap notes"
+        ),
     }
 }
 

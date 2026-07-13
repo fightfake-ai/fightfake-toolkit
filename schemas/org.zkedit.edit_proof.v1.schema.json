@@ -49,6 +49,10 @@
     "proof_size_bytes": {
       "type": "integer",
       "minimum": 1
+    },
+    "gadget_params": {
+      "description": "Gadget-specific parameters (e.g. brightness scale, or redact region + frame range). Omitted when the gadget takes no parameters.",
+      "type": "object"
     }
   },
   "additionalProperties": false

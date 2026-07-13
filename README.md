@@ -28,9 +28,10 @@ certificate is indistinguishable from a legitimate edit.
 trust, it produces a **mathematical proof** — a compact blob of bytes that any verifier can
 check independently, without trusting the signer, without access to the original footage, and
 without any knowledge of who produced the video.  The proof shows that a specific pixel-level
-transformation (brightness, grayscale, invert, …) is the *only* difference between the
-captured original and the published version.  If even a single pixel was changed in any other
-way, the proof does not verify.
+transformation — whole-frame (brightness, grayscale, invert) or scoped to one region and a
+handful of frames (`redact`, e.g. blacking out a single bystander's face for a couple of
+seconds) — is the *only* difference between the captured original and the published version.
+If even a single pixel was changed in any other way, the proof does not verify.
 
 In short:
 - **Standard C2PA:** *"Trust me — I declare this is what was edited."*
@@ -288,6 +289,181 @@ Measured on an Apple M1 MacBook Pro.  To reproduce on your machine:
 
 With `--features eva-backend`, the "ZK proving" row dominates and typically takes
 several minutes for a 5-second 1920×1072 clip on an M1 Mac.
+
+### Step 2b — editing only a small region for a couple of seconds (`redact`)
+
+`brightness`/`grayscale`/`invert` apply to every pixel of every frame.  A common real case is
+narrower: black out (or eventually blur) *one* rectangle — e.g. a bystander's face — for only
+a second or two, and leave the rest of the clip untouched.  The `redact` gadget does exactly
+this: it overwrites a fixed pixel rectangle with a solid fill colour, only for a chosen frame
+range, and copies every other pixel and every other frame through byte-for-byte unchanged.
+
+```bash
+./target/release/fightfake prove-edit \
+  --input testdata/videos/input/demos1.mp4 \
+  --gadget redact \
+  --redact-x 2464 --redact-y 1312 --redact-width 512 --redact-height 704 \
+  --redact-frame-start 52 --redact-frame-end 64 \
+  --redact-fill 0 \
+  --out-dir out/demos1
+```
+
+This redacts the one clearly-recognisable, unmasked face in `demos1.mp4` (cap + full beard,
+looking straight at the camera around t≈2.4s). Note the frame range here is short (12 frames,
+≈0.5s) — see [_picking a box on shaky, handheld footage_](#picking-a-box-on-shaky-handheld-footage)
+below for why, and what a longer redaction window would require.
+
+| Flag | Meaning |
+|---|---|
+| `--redact-x`, `--redact-y` | Top-left pixel of the rectangle |
+| `--redact-width`, `--redact-height` | Rectangle size in pixels |
+| `--redact-frame-start` (inclusive), `--redact-frame-end` (exclusive) | Which frames get redacted; every other frame is untouched |
+| `--redact-fill` | Luma fill value inside the rectangle (`0` = black); chroma is always set to neutral (128) |
+
+**How to find the numbers for your own video.** There is no face detector wired in — you pick
+the box by looking at the frames:
+
+```bash
+# 1. Find frame rate / frame count.
+ffprobe -v error -select_streams v:0 \
+  -show_entries stream=width,height,r_frame_rate,nb_frames \
+  testdata/videos/input/demos1.mp4
+# → 3840×2160, 24000/1001 fps (≈23.976), 168 frames, 7.0 s
+
+# 2. Extract a still around the moment the face is visible and crop-preview a candidate box.
+ffmpeg -ss 2.4 -i testdata/videos/input/demos1.mp4 -frames:v 1 \
+  -vf "crop=512:704:2464:1312" preview.png
+# open preview.png, nudge x/y/w/h until the box frames the face, then convert
+# the timestamp(s) you want covered to frame numbers: frame ≈ seconds × fps.
+```
+
+Picking box coordinates that are multiples of 16 (as in the example above) costs nothing today
+and keeps the option open for a future `--features eva-backend` prover, since Eva's macroblock
+grid is 16×16.
+
+#### Picking a box on shaky, handheld footage
+
+`demos1.mp4` is handheld crowd footage: the camera pans and shakes, people move, and other
+people's arms/signs pass in front of the lens. A `redact` box is fixed relative to the
+**frame**, not to the person — it does not track anything. Scrubbing through this clip
+frame-by-frame around the subject shows the actual situation:
+
+| time | what's at box `(2464, 1312, 512×704)` |
+|---|---|
+| t ≈ 2.0–2.2s | subject hasn't entered this part of the frame yet |
+| t ≈ 2.3–2.6s | subject's face is fully visible and unoccluded — the usable window |
+| t ≈ 2.7–2.8s | a raised arm starts crossing in front of his face |
+| t ≈ 2.9–4.3s | a cardboard sign held close to the camera blocks this whole region |
+
+So the *reliably redactable* window with one fixed box is closer to half a second (12 frames)
+than the full ~2 seconds a viewer perceives the person as "in the video" — the rest of the
+time he's either out of this exact box or genuinely occluded by something else in the crowd.
+Two honest ways to actually cover a longer span:
+
+1. **Enlarge the box** enough to contain his whole range of motion across the window you want
+   (verify frame-by-frame, the way this example was built — the box does not need to be
+   tight, it only needs to stay wide enough for the whole window).
+2. **Track a moving box per frame** instead of one fixed rectangle — this is the "moving
+   region" item in the [Roadmap](#roadmap): once the CLI accepts a per-frame list of boxes
+   instead of a single one, occlusion by other things in the scene is still a hard limit, but
+   camera motion and small subject motion stop being one.
+
+Neither of these is specific to this toolkit — it's the same reason real redaction tools (e.g.
+newsroom face-blurring software) use frame-by-frame tracking rather than one static box.
+
+**What this buys you over `brightness`/`grayscale`/`invert` on the whole clip:** h1/h2 still
+cover the *entire* video (nothing about the overall pipeline changes), but the declared edit —
+and, once wired to the real prover, the ZK proof — is scoped to exactly the pixels and frames
+that actually changed. A verifier (or a human reading the manifest) sees precisely what
+changed and can independently confirm that the other ~99% of the video's pixels are provably
+identical to the original, instead of having to trust a blanket "brightness was applied"
+claim across the whole clip.
+
+The exact rectangle and frame range are recorded in the `org.zkedit.edit_proof` assertion's
+`gadget_params` field and rendered into the standard `c2pa.actions` description, e.g.:
+
+> Blacked out a 512×704 pixel region at (2464, 1312), frames 52–64 only (fill value 0).
+> All other pixels and frames are unchanged.
+
+**Current limitation — stub build only.** `redact` works end-to-end in the default (stub)
+build: real edit, real h1/h2 over the whole clip, real signed C2PA manifests with the region
+and frame range spelled out. It does **not** yet work with `--features eva-backend`: Eva
+already has the right primitive for this (a `Masking`/`MaskCfg` gadget that replaces
+individual pixels with an explicit value, which is exactly a provable blackout box), but today
+`prove-edit`'s Nova IVC loop applies one fixed edit config to every macroblock of the whole
+video — it does not yet vary the config per macroblock/per frame the way a spatially- and
+temporally-scoped redaction needs. Wiring that up, plus deciding whether to prove every
+macroblock of a large clip or only the touched time window (with the untouched frames
+anchored by hash continuity instead), is tracked in the [Roadmap](#roadmap) and explained in
+detail below.
+
+#### Wiring `redact` to the real ZK prover
+
+Eva's `Masking` edit gadget (`video/src/edit/constraints.rs`) already provides the primitive
+`redact` needs: its config, `MaskCfg`, is a per-macroblock triple of `(fill value, replace?)`
+pairs — one for each of the 16×16 luma samples and each of the two 8×8 chroma planes — and
+`edit_native`/`edit_circuit` apply it pixel-by-pixel: substitute the fill value where
+`replace` is true, pass the original pixel through otherwise. That is a provable,
+per-pixel-selectable blackout.
+
+`MaskCfg` carries no frame number, because it doesn't need one. Eva's Nova IVC walks
+macroblocks in one long, strictly-ordered sequence — global index
+`= frame_index × macroblocks_per_frame + macroblock_index` (see `yuv420_to_macroblocks` /
+`macroblocks_to_yuv420` in `video/src/macroblock_yuv.rs`) — and `fs.prove_step(...)` can
+already be given a different `MaskCfg` per macroblock within each step. Temporal and spatial
+targeting of a redaction box therefore falls out entirely from *which config is supplied at
+which position in that sequence*; since width/height/frame count are public, the position ⇔
+`(frame, row, col)` mapping is unambiguous to a verifier too.
+
+What's missing is on the toolkit side, not in Eva. `run_nova_groth16!`'s per-step config
+closures (`fightfake-cli/src/workflow.rs`) all currently have the shape
+`|n: usize| vec![cfg; n]` — they receive only `n` (macroblocks per step), never the step
+index, so every step gets the same config regardless of which macroblocks it covers. Wiring
+`redact` up means extending that closure to also take the step index, compute which
+macroblocks at that step fall inside `(x, y, w, h)` during `[frame_start, frame_end)`, and emit
+a `MaskCfg` with `replace=true, value=fill_y` for exactly those pixels and `replace=false`
+elsewhere.
+
+#### Proving only the touched time window
+
+Even once per-step `MaskCfg` variation is wired up, proving *every* macroblock of a long clip
+just to redact a couple of seconds is wasteful. Take `demos1.mp4`: 3840×2160 → 240×135 = 32,400
+macroblocks per frame, × 168 frames = **5,443,200 macroblocks** for the whole 7-second clip. Our
+redaction only touches frames 52–64 (12 frames). Running the full Nova IVC + Groth16 decider
+over 5.4M macroblocks to prove a 12-frame edit is not a proportionate cost.
+
+The key observation: outside the redacted window, `MaskCfg` is the identity (`replace=false`
+everywhere) — i.e. "prove that edited pixel = original pixel" for those macroblocks. But that
+specific claim ("these bytes are exactly these other bytes") is exactly what a **plain hash**
+already proves — you don't need a SNARK to prove `A = A`; you only need the SNARK to constrain
+the macroblocks that actually changed, so a verifier can be sure the *only* change is the
+declared one.
+
+Concretely, split the macroblock sequence into three segments and treat them differently:
+
+| segment | frames | macroblocks | how it's attested |
+|---|---|---|---|
+| PRE  | 0–51    | 1,652,400 | plain hash over the raw bytes (no circuit) |
+| TOUCHED | 52–63 | 388,800 (or as few as ~16,896 if scoped to just the macroblocks the box overlaps) | real Nova IVC + Groth16, `MaskCfg` varying per macroblock |
+| POST | 64–167  | 3,402,000 | plain hash over the raw bytes (no circuit) |
+
+The published `h1`/`h2` become small hash-chains over the three pieces, e.g.
+`h1 = Griffin("pre" ‖ h_pre ‖ "mid" ‖ h1_mid ‖ "post" ‖ h_post)`, where `h_pre`/`h_post` are
+ordinary hashes computed directly over the untouched pixel bytes, and `h1_mid`/`h2_mid` are the
+real IVC/Groth16 outputs for just the touched window. A verifier who trusts the construction
+(it's a fixed, public formula) gets exactly the same end-to-end guarantee as today — h1 still
+commits to every byte of the original video, h2 still commits to every byte of the edited
+video — but the expensive part (ZK proving) now only has to cover the 388,800 macroblocks that
+could actually differ, not all 5.44M. That's roughly a **14×** speedup just from windowing to
+the touched frames, or up to **~320×** if scoped down to only the macroblocks the redaction box
+overlaps within those frames — turning "not remotely practical" into a proof that finishes in a
+reasonable time, for exactly the case this toolkit targets: short, localised edits inside much
+longer recordings (a drone clip where 2 seconds out of a 10-minute flight need a face blurred).
+
+This only pays off because "untouched" has a cheap, well-defined meaning outside the circuit
+(byte-identical, provable by a plain hash). It would **not** help a gadget like `brightness`
+that touches every pixel of every frame — there, every macroblock is already "touched" and has
+to go through the real circuit regardless.
 
 ### Step 3 — verify an edit proof
 
@@ -728,9 +904,15 @@ Key differences visible in the diff:
 fightfake prove-edit --input <VIDEO> [OPTIONS]
 
   --input, -i <FILE>       Input video (path relative to cwd, or absolute)
-  --gadget <NAME>          Edit to apply: brightness | grayscale | invert  [default: brightness]
-  --gadget-param <N>       Gadget-specific parameter:
-                             brightness: luma scale in units of 1/1024 (default 416 ≈ 0.41×)
+  --gadget <NAME>          Edit to apply: brightness | grayscale | invert | redact  [default: brightness]
+  --gadget-param <N>       brightness: luma scale in units of 1/1024 (default 416 ≈ 0.41×)
+  --redact-x <N>           redact: top-left X pixel of the rectangle  [default: 0]
+  --redact-y <N>           redact: top-left Y pixel of the rectangle  [default: 0]
+  --redact-width <N>       redact: rectangle width in pixels  [default: 0 — must be set]
+  --redact-height <N>      redact: rectangle height in pixels  [default: 0 — must be set]
+  --redact-frame-start <N> redact: first frame, inclusive, 0-based  [default: 0]
+  --redact-frame-end <N>   redact: last frame, exclusive  [default: 0 — must be set]
+  --redact-fill <N>        redact: luma fill value, 0-255 (0 = black)  [default: 0]
   --out-dir, -o <DIR>      Output directory for all artefacts  [default: out]
   --cert <FILE>            PEM signer certificate  [default: testdata/certs/signer-cert.pem]
   --key  <FILE>            PEM signer private key   [default: testdata/certs/signer-key.pem]
@@ -906,7 +1088,12 @@ All custom C2PA assertions use the `org.zkedit.*` namespace, designed to be sche
 | Label | Fields | Purpose |
 |---|---|---|
 | `org.zkedit.capture.v1` | `device_id`, `pipeline_stage`, `hash_algorithm`, `h1` | Fingerprint of original pixels, embedded at capture |
-| `org.zkedit.edit_proof.v1` | `gadget_id`, `h1`, `h2`, `proof_system`, `circuit_variant`, `proof_sha256` | Edit declaration and proof reference |
+| `org.zkedit.edit_proof.v1` | `gadget_id`, `h1`, `h2`, `proof_system`, `circuit_variant`, `proof_sha256`, `gadget_params` (optional) | Edit declaration and proof reference |
+
+`gadget_params` is a free-form object recording the exact parameters of the edit — e.g.
+`{"scale": 416}` for brightness, or `{"x":880,"y":1184,"w":480,"h":480,"frame_start":101,"frame_end":125,"fill_y":0}`
+for `redact` — so a verifier can see precisely what was edited without re-running the pipeline.
+It is omitted for parameterless gadgets (grayscale, invert).
 
 JSON Schemas are in `schemas/`.  Both assertions are validated against these schemas before
 any C2PA signing step.
@@ -984,6 +1171,18 @@ the most likely paths forward for production deployments.
 - [ ] WASM Groth16 verifier — `verifyGroth16Proof` for in-browser proof checking
 - [ ] Level 1 Raspberry Pi demonstrator (`docs/level1-pi-demonstrator.md`)
 - [ ] Crop/padding gadget to handle non-16-aligned captures provably (see above)
+- [ ] Wire the `redact` gadget to `--features eva-backend`: per-macroblock/per-frame varying
+      `MaskCfg` in the Nova IVC loop — see [_wiring redact to the real ZK
+      prover_](#wiring-redact-to-the-real-zk-prover) for exactly what's already there in Eva
+      vs. what's missing in the toolkit's driver code
+- [ ] "Prove only the touched time window, hash-anchor the rest": don't run the ZK prover over
+      an entire multi-thousand-macroblock clip just to redact a couple of seconds of it — see
+      [_proving only the touched time window_](#proving-only-the-touched-time-window) above
+      for the concrete construction and expected speedup
+- [ ] Track a moving region across frames (per-frame box list) instead of one fixed rectangle,
+      for subjects that move during the redacted window — see
+      [_picking a box on shaky, handheld footage_](#picking-a-box-on-shaky-handheld-footage)
+- [ ] A true blur/pixelate fill (currently `redact` only supports a solid fill colour)
 - [ ] Proof serialisation format and public key distribution specification
 - [ ] fightfake.ai integration guide for web developers
 

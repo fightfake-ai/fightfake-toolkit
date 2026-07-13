@@ -53,6 +53,13 @@ pub struct EditProofAssertionV1 {
     /// SHA-256 of the proof binary so verifiers can locate and authenticate it.
     pub proof_sha256: String,
     pub proof_size_bytes: u64,
+    /// Gadget-specific parameters, e.g. `{"scale": 416}` for brightness or
+    /// `{"x":.., "y":.., "w":.., "h":.., "frame_start":.., "frame_end":..}`
+    /// for redact.  Omitted (not `null`) when a gadget takes no parameters.
+    /// This is what lets a verifier — or a human reading the C2PA manifest —
+    /// see exactly which pixels, and for which frames, the proof covers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gadget_params: Option<serde_json::Value>,
 }
 
 pub fn read_capture_assertion(path: &Path) -> Result<CaptureAssertionV1> {

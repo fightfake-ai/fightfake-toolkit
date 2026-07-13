@@ -120,7 +120,7 @@ pub fn sign_edit_asset(
     // c2pa.actions — required by standard C2PA verifiers and viewers.
     // Maps fightfake gadget IDs to the nearest standard C2PA action code.
     let c2pa_action = gadget_to_c2pa_action(&edit.gadget_id);
-    let description = gadget_description(&edit.gadget_id);
+    let description = gadget_description(&edit.gadget_id, edit.gadget_params.as_ref());
     let actions_assertion = json!({
         "actions": [{
             "action": c2pa_action,
@@ -158,22 +158,48 @@ pub fn sign_edit_asset(
 
 /// Map our gadget IDs to the closest standard `c2pa.actions` action code.
 /// See https://c2pa.org/specifications/specifications/1.4/specs/C2PA_Specification.html#_actions
+///
+/// Note: `redact` maps to `c2pa.drawing` ("changes using drawing tools
+/// including brushes or eraser"), not `c2pa.redacted` — the latter is a
+/// reserved C2PA action meaning "a manifest assertion was removed" and does
+/// not describe a pixel-level edit at all.
 fn gadget_to_c2pa_action(gadget_id: &str) -> &'static str {
     match gadget_id {
         "brightness" => "c2pa.color_adjustments",
         "grayscale"  => "c2pa.color_adjustments",
         "invert"     => "c2pa.color_adjustments",
         "crop"       => "c2pa.cropped",
+        "redact"     => "c2pa.drawing",
         _            => "c2pa.edited",
     }
 }
 
-fn gadget_description(gadget_id: &str) -> String {
-    match gadget_id {
-        "brightness" => "Brightness adjustment (luma scale 416/1024 ≈ 0.41×)".to_owned(),
-        "grayscale"  => "Converted to grayscale (chroma set to neutral)".to_owned(),
-        "invert"     => "Colour invert (all channels: 255 − pixel)".to_owned(),
-        other        => format!("Edit gadget: {other}"),
+/// Build a human-readable description of the edit, using the actual
+/// `gadget_params` recorded by the workflow rather than a generic string —
+/// so the description reflects what was really done, not just which gadget
+/// ran.  Falls back to a generic sentence if params were not recorded.
+fn gadget_description(gadget_id: &str, params: Option<&serde_json::Value>) -> String {
+    match (gadget_id, params) {
+        ("brightness", Some(p)) => {
+            let scale = p.get("scale").and_then(|v| v.as_u64()).unwrap_or(0);
+            format!(
+                "Brightness adjustment (luma scale {scale}/1024 ≈ {:.2}×)",
+                scale as f64 / 1024.0
+            )
+        }
+        ("brightness", None) => "Brightness adjustment".to_owned(),
+        ("grayscale", _) => "Converted to grayscale (chroma set to neutral)".to_owned(),
+        ("invert", _) => "Colour invert (all channels: 255 − pixel)".to_owned(),
+        ("redact", Some(p)) => {
+            let g = |k: &str| p.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+            format!(
+                "Blacked out a {}×{} pixel region at ({}, {}), frames {}–{} only \
+                 (fill value {}). All other pixels and frames are unchanged.",
+                g("w"), g("h"), g("x"), g("y"), g("frame_start"), g("frame_end"), g("fill_y"),
+            )
+        }
+        ("redact", None) => "Blacked out a pixel region for a limited frame range".to_owned(),
+        (other, _) => format!("Edit gadget: {other}"),
     }
 }
 

@@ -52,9 +52,39 @@ enum Command {
         gadget: GadgetArg,
 
         /// Gadget parameter.  For brightness: luma scale in units of 1/1024
-        /// (default 416 ≈ 0.41× — matches Eva's BrightnessCfg(416)).
+        /// (default 416 ≈ 0.41× — matches Eva's BrightnessCfg(416)).  Unused
+        /// for grayscale/invert/redact.
         #[arg(long, default_value = "416")]
         gadget_param: u16,
+
+        /// Redact: top-left X pixel coordinate of the rectangle to black out.
+        #[arg(long, default_value = "0")]
+        redact_x: usize,
+
+        /// Redact: top-left Y pixel coordinate of the rectangle to black out.
+        #[arg(long, default_value = "0")]
+        redact_y: usize,
+
+        /// Redact: width in pixels of the rectangle to black out.
+        #[arg(long, default_value = "0")]
+        redact_width: usize,
+
+        /// Redact: height in pixels of the rectangle to black out.
+        #[arg(long, default_value = "0")]
+        redact_height: usize,
+
+        /// Redact: first frame (inclusive, 0-based) covered by the redaction.
+        #[arg(long, default_value = "0")]
+        redact_frame_start: usize,
+
+        /// Redact: last frame (exclusive) covered by the redaction.  Use
+        /// `probe`d frame count or a value ≥ it to redact through the end.
+        #[arg(long, default_value = "0")]
+        redact_frame_end: usize,
+
+        /// Redact: luma fill value inside the rectangle (0 = black).
+        #[arg(long, default_value = "0")]
+        redact_fill: u8,
 
         /// Output directory for all artefacts (created if absent).
         #[arg(long, short, default_value = "out")]
@@ -284,6 +314,8 @@ enum GadgetArg {
     Brightness,
     Grayscale,
     Invert,
+    /// Black out a fixed pixel rectangle, only for a limited frame range.
+    Redact,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -311,6 +343,13 @@ fn main() -> Result<()> {
             input,
             gadget,
             gadget_param,
+            redact_x,
+            redact_y,
+            redact_width,
+            redact_height,
+            redact_frame_start,
+            redact_frame_end,
+            redact_fill,
             out_dir,
             cert,
             key,
@@ -321,6 +360,23 @@ fn main() -> Result<()> {
                 GadgetArg::Brightness => Gadget::Brightness { scale: gadget_param },
                 GadgetArg::Grayscale  => Gadget::Grayscale,
                 GadgetArg::Invert     => Gadget::Invert,
+                GadgetArg::Redact     => {
+                    if redact_width == 0 || redact_height == 0 || redact_frame_end == 0 {
+                        anyhow::bail!(
+                            "--gadget redact requires --redact-width, --redact-height, \
+                             and --redact-frame-end (exclusive) to be set (all > 0)"
+                        );
+                    }
+                    Gadget::Redact {
+                        x: redact_x,
+                        y: redact_y,
+                        w: redact_width,
+                        h: redact_height,
+                        frame_start: redact_frame_start,
+                        frame_end: redact_frame_end,
+                        fill_y: redact_fill,
+                    }
+                }
             };
             let out = run_prove_edit(&ProveEditConfig {
                 input,
@@ -386,6 +442,7 @@ fn main() -> Result<()> {
                 h2,
                 proof_sha256: hex::encode(Sha256::digest(&proof)),
                 proof_size_bytes: proof.len() as u64,
+                gadget_params: None,
             };
             write_json(out, &payload)?;
         }
