@@ -14,7 +14,22 @@ default = []
 # Without this flag, `prove-edit` runs in Level-0 mode: edits and hashes the
 # video but emits a placeholder proof.  Use `--features eva-backend` to build
 # the cryptographic prover.
-eva-backend = ["dep:video"]
+eva-backend = [
+    "dep:video",
+    "dep:ndarray",
+    "dep:ark-bn254",
+    "dep:ark-grumpkin",
+    "dep:ark-ec",
+    "dep:ark-ff",
+    "dep:ark-std",
+    "dep:ark-groth16",
+    "dep:ark-snark",
+    "dep:ark-serialize",
+    "dep:ark-crypto-primitives",
+    "dep:folding-schemes",
+    "dep:rand",
+    "dep:rayon",
+]
 
 [dependencies]
 fightfake-core = { path = "../fightfake-core" }
@@ -53,6 +68,7 @@ folding-schemes          = { git = "https://github.com/miha-stopar/eva",
                              optional = true }
 rand     = { version = "0.8", optional = true }
 rayon    = { version = "1.7", optional = true }
+ndarray  = { version = "0.15", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Used for ffmpeg subprocess calls (native only)

@@ -385,19 +385,14 @@ The exact rectangle and frame range are recorded in the `org.zkedit.edit_proof` 
 > Blacked out a 512×704 pixel region at (2464, 1312), frames 52–64 only (fill value 0).
 > All other pixels and frames are unchanged.
 
-**Current limitation — stub build only.** `redact` works end-to-end in the default (stub)
-build: real edit, real h1/h2 over the whole clip, real signed C2PA manifests with the region
-and frame range spelled out. It does **not** yet work with `--features eva-backend`: Eva
-already has the right primitive for this (a `Masking`/`MaskCfg` gadget that replaces
-individual pixels with an explicit value, which is exactly a provable blackout box), but today
-`prove-edit`'s Nova IVC loop applies one fixed edit config to every macroblock of the whole
-video — it does not yet vary the config per macroblock/per frame the way a spatially- and
-temporally-scoped redaction needs. Wiring that up, plus deciding whether to prove every
-macroblock of a large clip or only the touched time window (with the untouched frames
-anchored by hash continuity instead), is tracked in the [Roadmap](#roadmap) and explained in
-detail below.
+**Proof modes.** Without `--features eva-backend`, `redact` still produces a real edit, real
+h1/h2, and signed C2PA manifests, but the proof is a 32-byte stub. Build with
+`--features eva-backend` for a real Nova IVC + Groth16 proof over Eva's `Masking` gadget,
+with a per-macroblock `MaskCfg` that varies by frame and position inside the redaction box.
+The `Masking` circuit is heavier than `brightness`/`grayscale`/`invert` — if proving runs out
+of memory, lower `--blocks-per-step` (e.g. `4` instead of the default `256`).
 
-#### Wiring `redact` to the real ZK prover
+#### How `redact` maps onto Eva's `Masking` gadget
 
 Eva's `Masking` edit gadget (`video/src/edit/constraints.rs`) already provides the primitive
 `redact` needs: its config, `MaskCfg`, is a per-macroblock triple of `(fill value, replace?)`
@@ -415,18 +410,15 @@ targeting of a redaction box therefore falls out entirely from *which config is 
 which position in that sequence*; since width/height/frame count are public, the position ⇔
 `(frame, row, col)` mapping is unambiguous to a verifier too.
 
-What's missing is on the toolkit side, not in Eva. `run_nova_groth16!`'s per-step config
-closures (`fightfake-cli/src/workflow.rs`) all currently have the shape
-`|n: usize| vec![cfg; n]` — they receive only `n` (macroblocks per step), never the step
-index, so every step gets the same config regardless of which macroblocks it covers. Wiring
-`redact` up means extending that closure to also take the step index, compute which
-macroblocks at that step fall inside `(x, y, w, h)` during `[frame_start, frame_end)`, and emit
-a `MaskCfg` with `replace=true, value=fill_y` for exactly those pixels and `replace=false`
-elsewhere.
+With `--features eva-backend`, `prove-edit` builds that config per macroblock at prove time:
+for each Nova step it computes which macroblocks fall inside `(x, y, w, h)` during
+`[frame_start, frame_end)` and emits a `MaskCfg` with `replace=true, value=fill_y` for exactly
+those pixels and `replace=false` elsewhere. The native edit path uses the same `Masking`
+gadget, so h2 from the reference edit matches what the circuit proves.
 
 #### Proving only the touched time window
 
-Even once per-step `MaskCfg` variation is wired up, proving *every* macroblock of a long clip
+Even with per-macroblock `MaskCfg` variation wired up, proving *every* macroblock of a long clip
 just to redact a couple of seconds is wasteful. Take `demos1.mp4`: 3840×2160 → 240×135 = 32,400
 macroblocks per frame, × 168 frames = **5,443,200 macroblocks** for the whole 7-second clip. Our
 redaction only touches frames 52–64 (12 frames). Running the full Nova IVC + Groth16 decider
@@ -1171,10 +1163,9 @@ the most likely paths forward for production deployments.
 - [ ] WASM Groth16 verifier — `verifyGroth16Proof` for in-browser proof checking
 - [ ] Level 1 Raspberry Pi demonstrator (`docs/level1-pi-demonstrator.md`)
 - [ ] Crop/padding gadget to handle non-16-aligned captures provably (see above)
-- [ ] Wire the `redact` gadget to `--features eva-backend`: per-macroblock/per-frame varying
-      `MaskCfg` in the Nova IVC loop — see [_wiring redact to the real ZK
-      prover_](#wiring-redact-to-the-real-zk-prover) for exactly what's already there in Eva
-      vs. what's missing in the toolkit's driver code
+- [x] Wire the `redact` gadget to `--features eva-backend`: per-macroblock/per-frame varying
+      `MaskCfg` in the Nova IVC loop (see [_how redact maps onto Eva's Masking
+      gadget_](#how-redact-maps-onto-evas-masking-gadget))
 - [ ] "Prove only the touched time window, hash-anchor the rest": don't run the ZK prover over
       an entire multi-thousand-macroblock clip just to redact a couple of seconds of it — see
       [_proving only the touched time window_](#proving-only-the-touched-time-window) above

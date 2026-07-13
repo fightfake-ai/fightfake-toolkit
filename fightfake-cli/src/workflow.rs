@@ -37,7 +37,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use fightfake_core::assertions::{
     CaptureAssertionV1, EditProofAssertionV1, CAPTURE_ASSERTION_TYPE, EDIT_PROOF_ASSERTION_TYPE,
 };
@@ -198,8 +198,16 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
 
     // 5. Generate ZK proof (real or stub).
     let t = std::time::Instant::now();
-    let (proof_bytes, proof_is_stub) =
-        generate_proof(&orig_y, &orig_u, &orig_v, &cfg.gadget, cfg.blocks_per_step)?;
+    let (proof_bytes, proof_is_stub) = generate_proof(
+        &orig_y,
+        &orig_u,
+        &orig_v,
+        width,
+        height,
+        num_frames,
+        &cfg.gadget,
+        cfg.blocks_per_step,
+    )?;
     let prove_s = t.elapsed().as_secs_f64();
 
     let proof_bin = out("proof.bin");
@@ -431,14 +439,13 @@ fn apply_edit_and_hash(
         Gadget::Redact { x, y, w, h, frame_start, frame_end, fill_y } => {
             #[cfg(feature = "eva-backend")]
             {
-                anyhow::bail!(
-                    "the redact gadget is not yet wired to the eva-backend ZK prover \
-                     (Eva's Masking/MaskCfg primitive supports it, but per-macroblock, \
-                     per-frame varying edit configs are not yet threaded through the \
-                     Nova IVC loop — see README's 16-pixel alignment / roadmap notes). \
-                     Run without --features eva-backend for a real edit + real hashes \
-                     with a stub proof."
-                );
+                let (ey, eu, ev) = native_redact_edit_macroblocks(
+                    orig_y, orig_u, orig_v, width, height, num_frames,
+                    *x, *y, *w, *h, *frame_start, *frame_end, *fill_y,
+                )
+                .map_err(|e| anyhow::anyhow!("redact edit: {e}"))?;
+                let h2 = sha256_hex(&ey, &eu, &ev);
+                return Ok((ey, eu, ev, h1, h2));
             }
             #[cfg(not(feature = "eva-backend"))]
             {
@@ -543,17 +550,38 @@ fn generate_proof(
     orig_y: &[u8],
     orig_u: &[u8],
     orig_v: &[u8],
+    width: usize,
+    height: usize,
+    num_frames: usize,
     gadget: &Gadget,
     blocks_per_step: usize,
 ) -> Result<(Vec<u8>, bool)> {
     #[cfg(feature = "eva-backend")]
     {
-        let bytes = prove_with_eva(orig_y, orig_u, orig_v, gadget, blocks_per_step)?;
+        let bytes = prove_with_eva(
+            orig_y,
+            orig_u,
+            orig_v,
+            width,
+            height,
+            num_frames,
+            gadget,
+            blocks_per_step,
+        )?;
         return Ok((bytes, false));
     }
     #[cfg(not(feature = "eva-backend"))]
     {
-        let _ = (orig_y, orig_u, orig_v, gadget, blocks_per_step);
+        let _ = (
+            orig_y,
+            orig_u,
+            orig_v,
+            width,
+            height,
+            num_frames,
+            gadget,
+            blocks_per_step,
+        );
         // 32 zero bytes — a deterministic, recordable placeholder.
         // Replace by re-running with `--features eva-backend`.
         Ok((vec![0u8; 32], true))
@@ -563,36 +591,208 @@ fn generate_proof(
 // ── Eva proving backend ───────────────────────────────────────────────────────
 
 #[cfg(feature = "eva-backend")]
+type EvaMacroblock = (
+    video::encode::Matrix<u8, 16, 16>,
+    video::encode::Matrix<u8, 8, 8>,
+    video::encode::Matrix<u8, 8, 8>,
+);
+
+/// Pack Eva macroblock byte streams into the matrix triples the IVC circuit expects.
+#[cfg(feature = "eva-backend")]
+fn macroblock_streams_to_blocks(
+    orig_y: &[u8],
+    orig_u: &[u8],
+    orig_v: &[u8],
+) -> Vec<EvaMacroblock> {
+    use video::encode::Matrix;
+    use video::macroblock_yuv::{MB_UV_BYTES, MB_Y_BYTES};
+
+    let n_mbs = orig_y.len() / MB_Y_BYTES;
+    (0..n_mbs)
+        .map(|i| {
+            (
+                Matrix::from_vec(orig_y[i * MB_Y_BYTES..(i + 1) * MB_Y_BYTES].to_vec()),
+                Matrix::from_vec(orig_u[i * MB_UV_BYTES..(i + 1) * MB_UV_BYTES].to_vec()),
+                Matrix::from_vec(orig_v[i * MB_UV_BYTES..(i + 1) * MB_UV_BYTES].to_vec()),
+            )
+        })
+        .collect()
+}
+
+#[cfg(feature = "eva-backend")]
 fn prove_with_eva(
     orig_y: &[u8],
     orig_u: &[u8],
     orig_v: &[u8],
+    width: usize,
+    height: usize,
+    num_frames: usize,
     gadget: &Gadget,
     blocks_per_step: usize,
 ) -> Result<Vec<u8>> {
-    use video::macroblock_yuv::{MB_UV_BYTES, MB_Y_BYTES};
-
-    // Pack separate Y/U/V macroblock streams into the per-MB block format
-    // Eva uses: [y0..y255, u0..u63, v0..v63] repeated for each macroblock.
-    let n_mbs = orig_y.len() / MB_Y_BYTES;
-    let mut blocks: Vec<Vec<u8>> = Vec::with_capacity(n_mbs);
-    for i in 0..n_mbs {
-        let mut b = Vec::with_capacity(MB_Y_BYTES + 2 * MB_UV_BYTES);
-        b.extend_from_slice(&orig_y[i * MB_Y_BYTES..(i + 1) * MB_Y_BYTES]);
-        b.extend_from_slice(&orig_u[i * MB_UV_BYTES..(i + 1) * MB_UV_BYTES]);
-        b.extend_from_slice(&orig_v[i * MB_UV_BYTES..(i + 1) * MB_UV_BYTES]);
-        blocks.push(b);
-    }
+    let blocks = macroblock_streams_to_blocks(orig_y, orig_u, orig_v);
 
     match gadget {
-        Gadget::Brightness { scale } => prove_nova_groth16_brightness(blocks, blocks_per_step, *scale),
+        Gadget::Brightness { scale } => {
+            prove_nova_groth16_brightness(blocks, blocks_per_step, *scale)
+        }
         Gadget::Grayscale => prove_nova_groth16_grayscale(blocks, blocks_per_step),
         Gadget::Invert => prove_nova_groth16_invert(blocks, blocks_per_step),
-        Gadget::Redact { .. } => anyhow::bail!(
-            "the redact gadget is not yet wired to the eva-backend ZK prover; \
-             see README's 16-pixel alignment / roadmap notes"
+        Gadget::Redact {
+            x,
+            y,
+            w,
+            h,
+            frame_start,
+            frame_end,
+            fill_y,
+        } => prove_nova_groth16_redact(
+            blocks,
+            blocks_per_step,
+            width,
+            height,
+            num_frames,
+            *x,
+            *y,
+            *w,
+            *h,
+            *frame_start,
+            *frame_end,
+            *fill_y,
         ),
     }
+}
+
+/// Build a per-macroblock [`MaskCfg`] for the `redact` gadget.
+///
+/// `global_mb` is the macroblock's index in Eva's linear order (frame-major,
+/// row-major within each frame). Pixels inside `[x, x+w) × [y, y+h)` during
+/// frames `[frame_start, frame_end)` are marked for replacement.
+#[cfg(feature = "eva-backend")]
+fn build_redact_mask_cfg(
+    global_mb: usize,
+    width: usize,
+    height: usize,
+    mbs_per_frame: usize,
+    x: usize,
+    y_off: usize,
+    w: usize,
+    h: usize,
+    frame_start: usize,
+    frame_end: usize,
+    fill_y: u8,
+) -> video::edit::constraints::MaskCfg {
+    use ndarray::Array2;
+    use video::edit::constraints::MaskCfg;
+    use video::macroblock_yuv::macroblock_xy;
+
+    let frame = global_mb / mbs_per_frame;
+    let mb_idx = global_mb % mbs_per_frame;
+    let (mb_x, mb_y) = macroblock_xy(width, mb_idx);
+    let origin_x = mb_x * 16;
+    let origin_y = mb_y * 16;
+
+    let in_frame_range = frame >= frame_start && frame < frame_end;
+
+    let x1 = x.min(width);
+    let y1 = y_off.min(height);
+    let x2 = (x + w).min(width);
+    let y2 = (y_off + h).min(height);
+
+    let y_mask = Array2::from_shape_fn((16, 16), |(m, n)| {
+        let px = origin_x + m;
+        let py = origin_y + n;
+        let in_box = in_frame_range && px >= x1 && px < x2 && py >= y1 && py < y2;
+        (fill_y, in_box)
+    });
+
+    let u_mask = Array2::from_shape_fn((8, 8), |(m, n)| {
+        let px = origin_x + m * 2;
+        let py = origin_y + n * 2;
+        let in_box = in_frame_range && px >= x1 && px < x2 && py >= y1 && py < y2;
+        (128u8, in_box)
+    });
+    let v_mask = u_mask.clone();
+
+    MaskCfg(y_mask, u_mask, v_mask)
+}
+
+/// Apply Eva's [`Masking`] gadget per macroblock — reference path that matches
+/// the in-circuit edit for `redact`.
+#[cfg(feature = "eva-backend")]
+#[allow(clippy::too_many_arguments)]
+fn native_redact_edit_macroblocks(
+    orig_y: &[u8],
+    orig_u: &[u8],
+    orig_v: &[u8],
+    width: usize,
+    height: usize,
+    num_frames: usize,
+    x: usize,
+    y_off: usize,
+    w: usize,
+    h: usize,
+    frame_start: usize,
+    frame_end: usize,
+    fill_y: u8,
+) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> {
+    use video::edit::constraints::{EditGadget, Masking};
+    use video::encode::Matrix;
+    use video::macroblock_yuv::{macroblocks_per_frame, MB_UV_BYTES, MB_Y_BYTES};
+
+    let mbs_per_frame = macroblocks_per_frame(width, height)?;
+    let total_mbs = orig_y.len() / MB_Y_BYTES;
+    if total_mbs != mbs_per_frame * num_frames {
+        return Err(format!(
+            "macroblock count mismatch: got {total_mbs}, expected {} for {num_frames} frame(s)",
+            mbs_per_frame * num_frames
+        ));
+    }
+    let f_end = frame_end.min(num_frames);
+    let need_y = total_mbs * MB_Y_BYTES;
+    let need_uv = total_mbs * MB_UV_BYTES;
+
+    let mut out_y = vec![0u8; need_y];
+    let mut out_u = vec![0u8; need_uv];
+    let mut out_v = vec![0u8; need_uv];
+
+    for global in 0..total_mbs {
+        let cfg = build_redact_mask_cfg(
+            global,
+            width,
+            height,
+            mbs_per_frame,
+            x,
+            y_off,
+            w,
+            h,
+            frame_start,
+            f_end,
+            fill_y,
+        );
+
+        let y = Matrix::<u8, 16, 16>::from_vec(
+            orig_y[global * MB_Y_BYTES..(global + 1) * MB_Y_BYTES].to_vec(),
+        );
+        let u = Matrix::<u8, 8, 8>::from_vec(
+            orig_u[global * MB_UV_BYTES..(global + 1) * MB_UV_BYTES].to_vec(),
+        );
+        let v = Matrix::<u8, 8, 8>::from_vec(
+            orig_v[global * MB_UV_BYTES..(global + 1) * MB_UV_BYTES].to_vec(),
+        );
+
+        let (y, u, v) = Masking::edit_native(&y, &u, &v, &cfg);
+
+        let y_arr: [u8; MB_Y_BYTES] = y.iter().copied().collect::<Vec<_>>().try_into().unwrap();
+        let u_arr: [u8; MB_UV_BYTES] = u.iter().copied().collect::<Vec<_>>().try_into().unwrap();
+        let v_arr: [u8; MB_UV_BYTES] = v.iter().copied().collect::<Vec<_>>().try_into().unwrap();
+
+        out_y[global * MB_Y_BYTES..(global + 1) * MB_Y_BYTES].copy_from_slice(&y_arr);
+        out_u[global * MB_UV_BYTES..(global + 1) * MB_UV_BYTES].copy_from_slice(&u_arr);
+        out_v[global * MB_UV_BYTES..(global + 1) * MB_UV_BYTES].copy_from_slice(&v_arr);
+    }
+
+    Ok((out_y, out_u, out_v))
 }
 
 /// Shared Nova IVC + Groth16 boilerplate.
@@ -635,7 +835,7 @@ macro_rules! run_nova_groth16 {
             Pedersen<Projective>, Pedersen<Projective2>,
         >;
 
-        let blocks: Vec<Vec<u8>> = $blocks;
+        let blocks: Vec<EvaMacroblock> = $blocks;
         let blocks_per_step: usize = $blocks_per_step;
         let num_steps = blocks.len() / blocks_per_step;
 
@@ -648,7 +848,7 @@ macro_rules! run_nova_groth16 {
             griffin_params: Arc::new(GriffinParams::new(16, 5, 9)),
         };
 
-        let edit_configs_0: Vec<_> = $edit_configs(blocks_per_step);
+        let edit_configs_0: Vec<_> = $edit_configs(0, blocks_per_step);
 
         println!("[prover] Nova preprocess ({} MBs, {blocks_per_step} per step)", blocks.len());
         let (pp, vp) = NOVA::preprocess(
@@ -700,7 +900,7 @@ macro_rules! run_nova_groth16 {
             .context("Nova init failed")?;
 
         for i in 0..num_steps {
-            let cfgs: Vec<_> = $edit_configs(blocks_per_step);
+            let cfgs: Vec<_> = $edit_configs(i, blocks_per_step);
             fs.prove_step(
                 &params,
                 &EditOnlyExternalInputs {
@@ -720,24 +920,36 @@ macro_rules! run_nova_groth16 {
             let r = Fq::rand(rng);
             let rx = (Projective2::generator() * r).into_affine().x().unwrap_or_default();
             let e = CRH::evaluate(&poseidon_config, [rx, px, py, fs.z_i[0]])
-                .context("Schnorr hash failed")?;
+                .map_err(|e| anyhow::anyhow!("Schnorr hash failed: {e}"))?;
             (rx, r + sk * Fq::from_le_bytes_mod_order(&e.into_bigint().to_bytes_le()))
         };
 
-        // Capture running/incoming instances BEFORE from_nova consumes `fs`.
-        let (running_instance, incoming_instance, _) = fs.instances();
+        // Capture the final Nova instances BEFORE from_nova consumes `fs`.
+        let U_i = fs.U_i.clone();
 
         let circuit = DeciderEthCircuit::<Projective, GVar, Projective2, GVar2>::from_nova(
             fs, params, device_vk, sigma,
         )
         .context("DeciderEthCircuit::from_nova failed")?;
 
-        println!("[prover] Groth16 decider prove");
-        let proof = Decider::prove(decider_pp, rng, circuit).context("Groth16 prove failed")?;
+        let u_i = circuit
+            .u_i
+            .clone()
+            .context("DeciderEthCircuit missing u_i witness")?;
 
-        // Serialize BEFORE moving proof into verify.
+        println!("[prover] Groth16 decider prove");
+        let (groth_proof, cm_t, r) =
+            Decider::prove(decider_pp, rng, circuit).context("Groth16 prove failed")?;
+
+        // Serialize the full decider bundle (Groth16 proof + Nova commitment data).
         let mut proof_bytes = Vec::new();
-        proof.serialize_compressed(&mut proof_bytes).context("proof serialization failed")?;
+        groth_proof
+            .serialize_compressed(&mut proof_bytes)
+            .context("proof serialization failed")?;
+        cm_t.serialize_compressed(&mut proof_bytes)
+            .context("cmT serialization failed")?;
+        r.serialize_compressed(&mut proof_bytes)
+            .context("r serialization failed")?;
 
         // Self-check.
         let ok = Decider::verify(
@@ -746,9 +958,9 @@ macro_rules! run_nova_groth16 {
             Fr::from(num_steps as u32),
             initial_state,
             last_state[1],
-            &running_instance,
-            &incoming_instance,
-            proof,
+            &U_i,
+            &u_i,
+            (groth_proof, cm_t, r),
         )
         .context("Groth16 self-verify failed")?;
         if !ok {
@@ -761,7 +973,7 @@ macro_rules! run_nova_groth16 {
 
 #[cfg(feature = "eva-backend")]
 fn prove_nova_groth16_brightness(
-    blocks: Vec<Vec<u8>>,
+    blocks: Vec<EvaMacroblock>,
     blocks_per_step: usize,
     scale: u16,
 ) -> Result<Vec<u8>> {
@@ -771,31 +983,82 @@ fn prove_nova_groth16_brightness(
         blocks_per_step,
         Brightness,
         BrightnessCfg(scale),
-        |n: usize| vec![BrightnessCfg(scale); n]
+        |_step: usize, n: usize| vec![BrightnessCfg(scale); n]
     )
 }
 
 #[cfg(feature = "eva-backend")]
-fn prove_nova_groth16_grayscale(blocks: Vec<Vec<u8>>, blocks_per_step: usize) -> Result<Vec<u8>> {
+fn prove_nova_groth16_grayscale(blocks: Vec<EvaMacroblock>, blocks_per_step: usize) -> Result<Vec<u8>> {
     use video::edit::constraints::Grayscale;
     run_nova_groth16!(
         blocks,
         blocks_per_step,
         Grayscale,
         (),
-        |n: usize| vec![(); n]
+        |_step: usize, n: usize| vec![(); n]
     )
 }
 
 #[cfg(feature = "eva-backend")]
-fn prove_nova_groth16_invert(blocks: Vec<Vec<u8>>, blocks_per_step: usize) -> Result<Vec<u8>> {
+fn prove_nova_groth16_invert(blocks: Vec<EvaMacroblock>, blocks_per_step: usize) -> Result<Vec<u8>> {
     use video::edit::constraints::InvertColor;
     run_nova_groth16!(
         blocks,
         blocks_per_step,
         InvertColor,
         (),
-        |n: usize| vec![(); n]
+        |_step: usize, n: usize| vec![(); n]
+    )
+}
+
+#[cfg(feature = "eva-backend")]
+#[allow(clippy::too_many_arguments)]
+fn prove_nova_groth16_redact(
+    blocks: Vec<EvaMacroblock>,
+    blocks_per_step: usize,
+    width: usize,
+    height: usize,
+    num_frames: usize,
+    x: usize,
+    y_off: usize,
+    w: usize,
+    h: usize,
+    frame_start: usize,
+    frame_end: usize,
+    fill_y: u8,
+) -> Result<Vec<u8>> {
+    use video::edit::constraints::Masking;
+    use video::macroblock_yuv::macroblocks_per_frame;
+
+    let mbs_per_frame = macroblocks_per_frame(width, height)
+        .map_err(|e| anyhow::anyhow!("macroblocks_per_frame: {e}"))?;
+    let f_end = frame_end.min(num_frames);
+
+    run_nova_groth16!(
+        blocks,
+        blocks_per_step,
+        Masking,
+        video::edit::constraints::MaskCfg::default(),
+        |step: usize, n: usize| {
+            let base_mb = step * n;
+            (0..n)
+                .map(|j| {
+                    build_redact_mask_cfg(
+                        base_mb + j,
+                        width,
+                        height,
+                        mbs_per_frame,
+                        x,
+                        y_off,
+                        w,
+                        h,
+                        frame_start,
+                        f_end,
+                        fill_y,
+                    )
+                })
+                .collect::<Vec<_>>()
+        }
     )
 }
 
