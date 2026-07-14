@@ -1633,7 +1633,7 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 [[package]]
 name = "folding-schemes"
 version = "0.1.0"
-source = "git+https://github.com/miha-stopar/eva?rev=2fb3eabd3d8e5493457a3f5ddea3259968c99d01#2fb3eabd3d8e5493457a3f5ddea3259968c99d01"
+source = "git+https://github.com/fightfake-ai/eva?rev=2fb3eabd3d8e5493457a3f5ddea3259968c99d01#2fb3eabd3d8e5493457a3f5ddea3259968c99d01"
 dependencies = [
  "ark-bn254",
  "ark-crypto-primitives",
@@ -4549,7 +4549,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "video"
 version = "0.1.0"
-source = "git+https://github.com/miha-stopar/eva?rev=2fb3eabd3d8e5493457a3f5ddea3259968c99d01#2fb3eabd3d8e5493457a3f5ddea3259968c99d01"
+source = "git+https://github.com/fightfake-ai/eva?rev=2fb3eabd3d8e5493457a3f5ddea3259968c99d01#2fb3eabd3d8e5493457a3f5ddea3259968c99d01"
 dependencies = [
  "ark-bn254",
  "ark-crypto-primitives",

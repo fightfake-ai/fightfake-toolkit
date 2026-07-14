@@ -81,7 +81,7 @@ efficiently provable inside a zero-knowledge circuit.
 
 ### Layer 3 — the zero-knowledge proof (the guarantor)
 
-The ZK proof (produced by [Eva](https://github.com/miha-stopar/eva)) is a single compact
+The ZK proof (produced by [Eva](https://github.com/fightfake-ai/eva)) is a single compact
 blob (~200 bytes for BN254/Groth16) that proves, without revealing the original frames:
 
 > "The edited pixels are the result of applying the declared edit gadget to the original
@@ -1055,7 +1055,7 @@ check without per-vendor customisation.
 
 ## How the proof system works (technical summary)
 
-The ZK proof is produced by [Eva](https://github.com/miha-stopar/eva), which uses:
+The ZK proof is produced by [Eva](https://github.com/fightfake-ai/eva), which uses:
 
 - **Nova IVC** (Incremental Verifiable Computation): processes the video macroblock by
   macroblock, maintaining a running accumulation of the proof state.  Each step proves the
