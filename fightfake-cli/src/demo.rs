@@ -79,6 +79,7 @@ pub fn run_level0_demo(cfg: Level0DemoConfig) -> Result<()> {
         proof_sha256: hex::encode(Sha256::digest(&proof)),
         proof_size_bytes: proof.len() as u64,
         gadget_params: None,
+        touched_window: None,
     };
     std::fs::write(
         &cfg.edit_assertion_out,

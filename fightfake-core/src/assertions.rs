@@ -60,6 +60,51 @@ pub struct EditProofAssertionV1 {
     /// see exactly which pixels, and for which frames, the proof covers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gadget_params: Option<serde_json::Value>,
+    /// Present when the ZK proof only covers a scoped "touched" frame range
+    /// (the `--touched-window` prove-edit flag): pre/post segments outside
+    /// this range are attested by a plain hash instead of the Nova/Groth16
+    /// circuit, since they are declared to be byte-identical to the original.
+    /// `h1`/`h2` above are then the outer combination of the three segment
+    /// hashes, not a single hash over the whole clip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub touched_window: Option<TouchedWindowInfo>,
+}
+
+/// SHA-256 (hex) of one of the three segments a "touched window" proof splits
+/// the macroblock sequence into.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SegmentHashes {
+    /// Hash over the untouched macroblocks before `frame_start`.
+    pub pre: String,
+    /// Hash over the macroblocks in `[frame_start, frame_end)` — the segment
+    /// actually covered by the Nova IVC + Groth16 circuit.
+    pub mid: String,
+    /// Hash over the untouched macroblocks from `frame_end` onward.
+    pub post: String,
+}
+
+/// Metadata recorded when `prove-edit --touched-window` scopes the real ZK
+/// proof to a frame range instead of the whole clip.
+///
+/// `h1`/`h2` in the enclosing [`EditProofAssertionV1`] are computed as
+/// `SHA256("pre" ‖ pre ‖ "mid" ‖ mid ‖ "post" ‖ post)` over the corresponding
+/// [`SegmentHashes`] (as raw 32-byte digests, not hex strings). A verifier who
+/// has the published edited video can recompute `h2_segments` directly from
+/// its pixels and confirm the pre/post segments were not tampered with,
+/// without needing the original video or a Groth16 verifier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TouchedWindowInfo {
+    /// First frame (inclusive, 0-based) covered by the real circuit.
+    pub frame_start: usize,
+    /// Last frame (exclusive) covered by the real circuit.
+    pub frame_end: usize,
+    /// Total frame count of the clip, so pre/post segment sizes are
+    /// unambiguous even without decoding the video.
+    pub num_frames: usize,
+    /// Segment hashes over the original (h1) pixel bytes.
+    pub h1_segments: SegmentHashes,
+    /// Segment hashes over the edited (h2) pixel bytes.
+    pub h2_segments: SegmentHashes,
 }
 
 pub fn read_capture_assertion(path: &Path) -> Result<CaptureAssertionV1> {

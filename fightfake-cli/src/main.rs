@@ -106,6 +106,15 @@ enum Command {
         /// more memory per step).
         #[arg(long, default_value = "256")]
         blocks_per_step: usize,
+
+        /// "Touched time window" (redact only): scope the real Nova IVC +
+        /// Groth16 proof to just the [redact-frame-start, redact-frame-end)
+        /// range instead of the whole clip. Frames outside that range are
+        /// attested by a plain hash instead, since a redact leaves them
+        /// byte-for-byte unchanged by construction. This is what makes
+        /// proving a short redaction in a long clip cheap.
+        #[arg(long)]
+        touched_window: bool,
     },
 
     /// Verify a signed capture asset (no edit proof needed).
@@ -355,6 +364,7 @@ fn main() -> Result<()> {
             key,
             device_id,
             blocks_per_step,
+            touched_window,
         } => {
             let gadget = match gadget {
                 GadgetArg::Brightness => Gadget::Brightness { scale: gadget_param },
@@ -365,6 +375,12 @@ fn main() -> Result<()> {
                         anyhow::bail!(
                             "--gadget redact requires --redact-width, --redact-height, \
                              and --redact-frame-end (exclusive) to be set (all > 0)"
+                        );
+                    }
+                    if redact_frame_start >= redact_frame_end {
+                        anyhow::bail!(
+                            "--redact-frame-start ({redact_frame_start}) must be less than \
+                             --redact-frame-end ({redact_frame_end})"
                         );
                     }
                     Gadget::Redact {
@@ -378,6 +394,9 @@ fn main() -> Result<()> {
                     }
                 }
             };
+            if touched_window && !matches!(gadget, Gadget::Redact { .. }) {
+                anyhow::bail!("--touched-window is only supported with --gadget redact");
+            }
             let out = run_prove_edit(&ProveEditConfig {
                 input,
                 gadget,
@@ -386,6 +405,7 @@ fn main() -> Result<()> {
                 key_pem: key,
                 device_id,
                 blocks_per_step,
+                touched_window_only: touched_window,
             })?;
 
             println!();
@@ -396,6 +416,12 @@ fn main() -> Result<()> {
             println!("signed edited        : {}", out.edited_signed_mp4.display());
             println!("h1                   : {}", out.h1_hex);
             println!("h2                   : {}", out.h2_hex);
+            if let Some(w) = &out.touched_window {
+                println!();
+                println!("touched window        : frames [{}, {}) of {}", w.frame_start, w.frame_end, w.num_frames);
+                println!("  h1 pre/mid/post     : {} / {} / {}", w.h1_segments.pre, w.h1_segments.mid, w.h1_segments.post);
+                println!("  h2 pre/mid/post     : {} / {} / {}", w.h2_segments.pre, w.h2_segments.mid, w.h2_segments.post);
+            }
             if out.proof_is_stub {
                 println!();
                 println!("NOTE: proof is a Level-0 stub (32 zero bytes).");
@@ -443,6 +469,7 @@ fn main() -> Result<()> {
                 proof_sha256: hex::encode(Sha256::digest(&proof)),
                 proof_size_bytes: proof.len() as u64,
                 gadget_params: None,
+                touched_window: None,
             };
             write_json(out, &payload)?;
         }

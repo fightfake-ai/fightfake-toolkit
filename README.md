@@ -418,13 +418,13 @@ using the macroblock's pixel origin and the declared `(x, y, w, h)` / frame rang
 edit path uses the same `RedactRect` gadget, so h2 from the reference edit matches what the
 circuit proves.
 
-#### Proving only the touched time window
+#### Proving only the touched time window (`--touched-window`)
 
-Even with per-macroblock `MaskCfg` variation wired up, proving *every* macroblock of a long clip
-just to redact a couple of seconds is wasteful. Take `demos1.mp4`: 3840×2160 → 240×135 = 32,400
-macroblocks per frame, × 168 frames = **5,443,200 macroblocks** for the whole 7-second clip. Our
-redaction only touches frames 52–64 (12 frames). Running the full Nova IVC + Groth16 decider
-over 5.4M macroblocks to prove a 12-frame edit is not a proportionate cost.
+Even with per-macroblock `RedactRectCfg` variation wired up, proving *every* macroblock of a long
+clip just to redact a couple of seconds is wasteful. Take `demos1.mp4`: 3840×2160 → 240×135 =
+32,400 macroblocks per frame, × 168 frames = **5,443,200 macroblocks** for the whole 7-second
+clip. Our redaction only touches frames 52–64 (12 frames). Running the full Nova IVC + Groth16
+decider over 5.4M macroblocks to prove a 12-frame edit is not a proportionate cost.
 
 The key observation: outside the redacted window, `RedactRectCfg` is the identity (no pixels
 replaced) — i.e. "prove that edited pixel = original pixel" for those macroblocks. But that
@@ -433,31 +433,73 @@ already proves — you don't need a SNARK to prove `A = A`; you only need the SN
 the macroblocks that actually changed, so a verifier can be sure the *only* change is the
 declared one.
 
-Concretely, split the macroblock sequence into three segments and treat them differently:
+`prove-edit --gadget redact --touched-window` implements exactly this: it splits the macroblock
+sequence into three segments around `[--redact-frame-start, --redact-frame-end)` and treats them
+differently.
+
+```bash
+./target/release/fightfake prove-edit \
+  --input testdata/videos/input/demos1.mp4 \
+  --gadget redact \
+  --redact-x 2464 --redact-y 1312 --redact-width 512 --redact-height 704 \
+  --redact-frame-start 52 --redact-frame-end 64 \
+  --redact-fill 0 \
+  --touched-window \
+  --out-dir out/demos1
+```
 
 | segment | frames | macroblocks | how it's attested |
 |---|---|---|---|
-| PRE  | 0–51    | 1,652,400 | plain hash over the raw bytes (no circuit) |
-| TOUCHED | 52–63 | 388,800 (or as few as ~16,896 if scoped to just the macroblocks the box overlaps) | real Nova IVC + Groth16, `RedactRectCfg` varying per macroblock |
-| POST | 64–167  | 3,402,000 | plain hash over the raw bytes (no circuit) |
+| PRE  | 0–51    | 1,652,400 | plain SHA-256 over the raw bytes (no circuit) |
+| MID (touched) | 52–63 | 388,800 | real Nova IVC + Groth16, `RedactRectCfg` varying per macroblock |
+| POST | 64–167  | 3,402,000 | plain SHA-256 over the raw bytes (no circuit) |
 
-The published `h1`/`h2` become small hash-chains over the three pieces, e.g.
-`h1 = Griffin("pre" ‖ h_pre ‖ "mid" ‖ h1_mid ‖ "post" ‖ h_post)`, where `h_pre`/`h_post` are
-ordinary hashes computed directly over the untouched pixel bytes, and `h1_mid`/`h2_mid` are the
-real IVC/Groth16 outputs for just the touched window. A verifier who trusts the construction
-(it's a fixed, public formula) gets exactly the same end-to-end guarantee as today — h1 still
-commits to every byte of the original video, h2 still commits to every byte of the edited
-video — but the expensive part (ZK proving) now only has to cover the 388,800 macroblocks that
-could actually differ, not all 5.44M. That's roughly a **14×** speedup just from windowing to
-the touched frames, or up to **~320×** if scoped down to only the macroblocks the redaction box
-overlaps within those frames — turning "not remotely practical" into a proof that finishes in a
-reasonable time, for exactly the case this toolkit targets: short, localised edits inside much
-longer recordings (a drone clip where 2 seconds out of a 10-minute flight need a face blurred).
+The published `h1`/`h2` become a small combination of the three segment hashes:
+
+```
+h1 = SHA256("pre" ‖ h1_pre ‖ "mid" ‖ h1_mid ‖ "post" ‖ h1_post)
+h2 = SHA256("pre" ‖ h2_pre ‖ "mid" ‖ h2_mid ‖ "post" ‖ h2_post)
+```
+
+where `h*_pre`/`h*_post` are ordinary SHA-256 hashes computed directly over the untouched
+original/edited pixel bytes, and `h*_mid` are SHA-256 hashes over just the touched window's
+pixel bytes — the segment the real Nova IVC/Groth16 circuit actually walks. Both segment
+breakdowns (`h1_segments`, `h2_segments`) plus the frame range are recorded in the
+`org.zkedit.edit_proof.v1` assertion's new `touched_window` field, so a verifier — or a human —
+can see exactly what's covered without re-deriving anything:
+
+```json
+"touched_window": {
+  "frame_start": 52, "frame_end": 64, "num_frames": 168,
+  "h1_segments": { "pre": "…", "mid": "…", "post": "…" },
+  "h2_segments": { "pre": "…", "mid": "…", "post": "…" }
+}
+```
+
+Because the edited video is public, anyone can independently decode it and recompute
+`h2_segments.pre`/`h2_segments.post` directly from its pixels to confirm the untouched regions
+really are what's claimed — no ZK verifier or original video required for that part. (`h1`'s
+pre/post segments can't be independently re-derived without the original video, same as the
+whole-clip `h1` today — that's expected, it's an opaque capture-time commitment either way.)
+
+End to end this gets the same guarantee as before — `h1` still commits to every byte of the
+original video, `h2` still commits to every byte of the edited video — but the expensive part
+(ZK proving) now only has to cover the 388,800 macroblocks that could actually differ, not all
+5.44M. That's roughly a **14×** speedup just from windowing to the touched frames. Scoping down
+further to just the macroblocks the redaction box overlaps within those frames (rather than
+whole frames) would buy up to ~320× and remains a possible future refinement — see the
+[Roadmap](#roadmap).
+
+`--blocks-per-step` must evenly divide the touched window's macroblock count (`--touched-window`
+fails fast with a clear error otherwise, rather than silently proving a truncated slice);
+`--blocks-per-step <macroblocks-per-frame>` (one full frame per Nova step) always works, since
+the touched window is always a whole number of frames.
 
 This only pays off because "untouched" has a cheap, well-defined meaning outside the circuit
 (byte-identical, provable by a plain hash). It would **not** help a gadget like `brightness`
 that touches every pixel of every frame — there, every macroblock is already "touched" and has
-to go through the real circuit regardless.
+to go through the real circuit regardless, so `--touched-window` is rejected for anything other
+than `redact`.
 
 ### Step 3 — verify an edit proof
 
@@ -912,6 +954,8 @@ fightfake prove-edit --input <VIDEO> [OPTIONS]
   --key  <FILE>            PEM signer private key   [default: testdata/certs/signer-key.pem]
   --device-id <ID>         Identifier embedded in the capture assertion  [default: dev-0]
   --blocks-per-step <N>    Macroblocks per Nova IVC step (Level 1 only)  [default: 256]
+  --touched-window         redact only: scope the real proof to [redact-frame-start, redact-frame-end);
+                           pre/post are hash-anchored instead — see "Proving only the touched time window"
 ```
 
 Without `--features eva-backend` (Level 0), the proof is a 32-byte placeholder.  The edit,
@@ -1168,10 +1212,12 @@ the most likely paths forward for production deployments.
 - [x] Wire the `redact` gadget to `--features eva-backend`: per-macroblock/per-frame varying
       `RedactRectCfg` in the Nova IVC loop (see [_how redact maps onto Eva's RedactRect
       gadget_](#how-redact-maps-onto-evas-redactrect-gadget))
-- [ ] "Prove only the touched time window, hash-anchor the rest": don't run the ZK prover over
-      an entire multi-thousand-macroblock clip just to redact a couple of seconds of it — see
-      [_proving only the touched time window_](#proving-only-the-touched-time-window) above
-      for the concrete construction and expected speedup
+- [x] "Prove only the touched time window, hash-anchor the rest": `prove-edit --gadget redact
+      --touched-window` scopes the ZK prover to just the declared frame range instead of an
+      entire multi-thousand-macroblock clip — see
+      [_proving only the touched time window_](#proving-only-the-touched-time-window---touched-window)
+      above for the construction and measured speedup. Scoping down further to just the
+      macroblocks the box overlaps (rather than whole frames) is still open.
 - [ ] Track a moving region across frames (per-frame box list) instead of one fixed rectangle,
       for subjects that move during the redacted window — see
       [_picking a box on shaky, handheld footage_](#picking-a-box-on-shaky-handheld-footage)

@@ -53,7 +53,32 @@
     "gadget_params": {
       "description": "Gadget-specific parameters (e.g. brightness scale, or redact region + frame range). Omitted when the gadget takes no parameters.",
       "type": "object"
+    },
+    "touched_window": {
+      "description": "Present when the ZK proof only covers a scoped 'touched' frame range (e.g. --touched-window with redact); pre/post segments outside this range are attested by plain hashes instead of the circuit. h1/h2 above are then SHA256(\"pre\" || pre || \"mid\" || mid || \"post\" || post) over the matching segment hashes.",
+      "type": "object",
+      "required": ["frame_start", "frame_end", "num_frames", "h1_segments", "h2_segments"],
+      "properties": {
+        "frame_start": { "type": "integer", "minimum": 0 },
+        "frame_end": { "type": "integer", "minimum": 0 },
+        "num_frames": { "type": "integer", "minimum": 0 },
+        "h1_segments": { "$ref": "#/$defs/segmentHashes" },
+        "h2_segments": { "$ref": "#/$defs/segmentHashes" }
+      },
+      "additionalProperties": false
     }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "segmentHashes": {
+      "type": "object",
+      "required": ["pre", "mid", "post"],
+      "properties": {
+        "pre": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+        "mid": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+        "post": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" }
+      },
+      "additionalProperties": false
+    }
+  }
 }

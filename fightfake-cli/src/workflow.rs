@@ -39,7 +39,8 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use fightfake_core::assertions::{
-    CaptureAssertionV1, EditProofAssertionV1, CAPTURE_ASSERTION_TYPE, EDIT_PROOF_ASSERTION_TYPE,
+    CaptureAssertionV1, EditProofAssertionV1, SegmentHashes, TouchedWindowInfo,
+    CAPTURE_ASSERTION_TYPE, EDIT_PROOF_ASSERTION_TYPE,
 };
 use sha2::{Digest, Sha256};
 
@@ -65,6 +66,16 @@ pub struct ProveEditConfig {
     pub device_id: String,
     /// Number of macroblocks processed per Nova IVC step (eva-backend only).
     pub blocks_per_step: usize,
+    /// "Touched time window": scope the real Nova IVC + Groth16 proof to just
+    /// the `[frame_start, frame_end)` range declared by `Gadget::Redact`,
+    /// instead of every macroblock in the clip. Pixels outside that range are
+    /// attested by a plain SHA-256 hash rather than the circuit — sound
+    /// because a `redact` outside its own frame range is the identity
+    /// transform by construction, so there is nothing for the circuit to
+    /// prove there. Only valid with `Gadget::Redact`; see `README.md` §
+    /// "Touched time window" for the security argument and the exact hash
+    /// formula this activates.
+    pub touched_window_only: bool,
 }
 
 /// Supported edit operations.
@@ -134,6 +145,8 @@ pub struct ProveEditOutput {
     pub h1_hex: String,
     pub h2_hex: String,
     pub proof_is_stub: bool,
+    /// Set when `touched_window_only` scoped the real proof to a frame range.
+    pub touched_window: Option<TouchedWindowInfo>,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -173,6 +186,31 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
         None
     };
 
+    // "Touched time window": only meaningful for `redact`, since every other
+    // gadget edits every pixel of every frame anyway. Resolved once, up
+    // front, and reused for both hashing (step 4) and proving (step 5) so
+    // they can never disagree about which frames are "touched".
+    let touched_window: Option<(usize, usize)> = if cfg.touched_window_only {
+        match &cfg.gadget {
+            Gadget::Redact { frame_start, frame_end, .. } => {
+                let frame_end = (*frame_end).min(num_frames);
+                if *frame_start >= frame_end {
+                    bail!(
+                        "--touched-window: empty or invalid frame range [{frame_start}, {frame_end})"
+                    );
+                }
+                Some((*frame_start, frame_end))
+            }
+            _ => bail!(
+                "--touched-window is only supported with --gadget redact (every other \
+                 gadget edits every pixel of every frame, so there is no untouched \
+                 region to skip)"
+            ),
+        }
+    } else {
+        None
+    };
+
     // 2. Decode to raw planar YUV 4:2:0.
     let raw_yuv_path = out("raw_orig.yuv");
     let t = std::time::Instant::now();
@@ -189,8 +227,24 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
 
     // 4. Apply edit gadget; compute h1 (original) and h2 (edited).
     let t = std::time::Instant::now();
-    let (edited_y, edited_u, edited_v, h1_hex, h2_hex) =
+    let (edited_y, edited_u, edited_v, mut h1_hex, mut h2_hex) =
         apply_edit_and_hash(&orig_y, &orig_u, &orig_v, width, height, num_frames, &cfg.gadget)?;
+
+    let touched_window_info = if let Some((frame_start, frame_end)) = touched_window {
+        let (h1w, h2w, info) = compute_touched_hashes(
+            &orig_y, &orig_u, &orig_v, &edited_y, &edited_u, &edited_v,
+            width, height, num_frames, frame_start, frame_end,
+        );
+        h1_hex = h1w;
+        h2_hex = h2w;
+        println!(
+            "[workflow] touched window: frames [{frame_start}, {frame_end}) of {num_frames} \
+             — only this range goes through the real circuit"
+        );
+        Some(info)
+    } else {
+        None
+    };
     let hash_s = t.elapsed().as_secs_f64();
     println!("[workflow] h1 = {h1_hex}");
     println!("[workflow] h2 = {h2_hex}");
@@ -207,6 +261,7 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
         num_frames,
         &cfg.gadget,
         cfg.blocks_per_step,
+        touched_window,
     )?;
     let prove_s = t.elapsed().as_secs_f64();
 
@@ -256,6 +311,7 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
         proof_sha256,
         proof_size_bytes: proof_bytes.len() as u64,
         gadget_params: cfg.gadget.params_json(),
+        touched_window: touched_window_info.clone(),
     };
 
     let capture_assertion_json = out("capture.assertion.json");
@@ -314,6 +370,7 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
         h1_hex,
         h2_hex,
         proof_is_stub,
+        touched_window: touched_window_info,
     })
 }
 
@@ -460,6 +517,130 @@ fn apply_edit_and_hash(
     }
 }
 
+// ── Touched time window ────────────────────────────────────────────────────────
+//
+// Splits the macroblock sequence into three byte ranges — pre/mid/post —
+// around the frames actually touched by an edit. `mid` is what the real
+// circuit proves; `pre`/`post` are attested by a plain hash instead, since
+// they are byte-identical to the original by construction. The buffer layout
+// differs by build: `eva-backend` tiles into Eva macroblock order (256 B luma
+// + 64 B U + 64 B V per macroblock, frame-major), while the Level-0 stub path
+// keeps ffmpeg's frame-sequential planar layout — so the byte stride per
+// frame differs, but the frame-range semantics are identical either way.
+#[allow(clippy::type_complexity)]
+struct SegmentByteRanges {
+    pre: (std::ops::Range<usize>, std::ops::Range<usize>, std::ops::Range<usize>),
+    mid: (std::ops::Range<usize>, std::ops::Range<usize>, std::ops::Range<usize>),
+    post: (std::ops::Range<usize>, std::ops::Range<usize>, std::ops::Range<usize>),
+}
+
+fn segment_byte_ranges(
+    width: usize,
+    height: usize,
+    num_frames: usize,
+    frame_start: usize,
+    frame_end: usize,
+) -> SegmentByteRanges {
+    let frame_start = frame_start.min(num_frames);
+    let frame_end = frame_end.min(num_frames).max(frame_start);
+
+    #[cfg(feature = "eva-backend")]
+    let (y_stride, uv_stride) = {
+        use video::macroblock_yuv::{MB_UV_BYTES, MB_Y_BYTES};
+        let mbs_per_frame = (width / 16) * (height / 16);
+        (mbs_per_frame * MB_Y_BYTES, mbs_per_frame * MB_UV_BYTES)
+    };
+    #[cfg(not(feature = "eva-backend"))]
+    let (y_stride, uv_stride) = {
+        let y_stride = width * height;
+        (y_stride, y_stride / 4)
+    };
+
+    let y = |f0: usize, f1: usize| (f0 * y_stride)..(f1 * y_stride);
+    let uv = |f0: usize, f1: usize| (f0 * uv_stride)..(f1 * uv_stride);
+
+    SegmentByteRanges {
+        pre: (y(0, frame_start), uv(0, frame_start), uv(0, frame_start)),
+        mid: (y(frame_start, frame_end), uv(frame_start, frame_end), uv(frame_start, frame_end)),
+        post: (y(frame_end, num_frames), uv(frame_end, num_frames), uv(frame_end, num_frames)),
+    }
+}
+
+fn segment_hash(
+    y: &[u8],
+    u: &[u8],
+    v: &[u8],
+    range: &(std::ops::Range<usize>, std::ops::Range<usize>, std::ops::Range<usize>),
+) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(&y[range.0.clone()]);
+    h.update(&u[range.1.clone()]);
+    h.update(&v[range.2.clone()]);
+    h.finalize().into()
+}
+
+/// `SHA256("pre" ‖ pre ‖ "mid" ‖ mid ‖ "post" ‖ post)` — the fixed public
+/// formula a verifier re-derives from the three segment hashes.
+fn combine_segment_hashes(pre: [u8; 32], mid: [u8; 32], post: [u8; 32]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(b"pre");
+    h.update(pre);
+    h.update(b"mid");
+    h.update(mid);
+    h.update(b"post");
+    h.update(post);
+    h.finalize().into()
+}
+
+/// Compute the windowed `h1`/`h2` (segment-combined) plus the breakdown to
+/// embed in the edit-proof assertion, for a `[frame_start, frame_end)`
+/// touched window.
+#[allow(clippy::too_many_arguments)]
+fn compute_touched_hashes(
+    orig_y: &[u8],
+    orig_u: &[u8],
+    orig_v: &[u8],
+    edited_y: &[u8],
+    edited_u: &[u8],
+    edited_v: &[u8],
+    width: usize,
+    height: usize,
+    num_frames: usize,
+    frame_start: usize,
+    frame_end: usize,
+) -> (String, String, TouchedWindowInfo) {
+    let ranges = segment_byte_ranges(width, height, num_frames, frame_start, frame_end);
+
+    let h1_pre = segment_hash(orig_y, orig_u, orig_v, &ranges.pre);
+    let h1_mid = segment_hash(orig_y, orig_u, orig_v, &ranges.mid);
+    let h1_post = segment_hash(orig_y, orig_u, orig_v, &ranges.post);
+
+    let h2_pre = segment_hash(edited_y, edited_u, edited_v, &ranges.pre);
+    let h2_mid = segment_hash(edited_y, edited_u, edited_v, &ranges.mid);
+    let h2_post = segment_hash(edited_y, edited_u, edited_v, &ranges.post);
+
+    let h1 = hex::encode(combine_segment_hashes(h1_pre, h1_mid, h1_post));
+    let h2 = hex::encode(combine_segment_hashes(h2_pre, h2_mid, h2_post));
+
+    let info = TouchedWindowInfo {
+        frame_start,
+        frame_end,
+        num_frames,
+        h1_segments: SegmentHashes {
+            pre: hex::encode(h1_pre),
+            mid: hex::encode(h1_mid),
+            post: hex::encode(h1_post),
+        },
+        h2_segments: SegmentHashes {
+            pre: hex::encode(h2_pre),
+            mid: hex::encode(h2_mid),
+            post: hex::encode(h2_post),
+        },
+    };
+
+    (h1, h2, info)
+}
+
 // ── Native pixel transforms (Level 0 + Eva-backend reference) ─────────────────
 
 /// Brightness: luma = min(255, luma × scale / 1024); chroma unchanged.
@@ -555,6 +736,7 @@ fn generate_proof(
     num_frames: usize,
     gadget: &Gadget,
     blocks_per_step: usize,
+    touched_window: Option<(usize, usize)>,
 ) -> Result<(Vec<u8>, bool)> {
     #[cfg(feature = "eva-backend")]
     {
@@ -567,6 +749,7 @@ fn generate_proof(
             num_frames,
             gadget,
             blocks_per_step,
+            touched_window,
         )?;
         return Ok((bytes, false));
     }
@@ -581,6 +764,7 @@ fn generate_proof(
             num_frames,
             gadget,
             blocks_per_step,
+            touched_window,
         );
         // 32 zero bytes — a deterministic, recordable placeholder.
         // Replace by re-running with `--features eva-backend`.
@@ -629,7 +813,58 @@ fn prove_with_eva(
     num_frames: usize,
     gadget: &Gadget,
     blocks_per_step: usize,
+    touched_window: Option<(usize, usize)>,
 ) -> Result<Vec<u8>> {
+    if let Some((frame_start, frame_end)) = touched_window {
+        let Gadget::Redact { x, y, w, h, fill_y, .. } = gadget else {
+            bail!("touched window proving is only implemented for the redact gadget");
+        };
+        use video::macroblock_yuv::{macroblocks_per_frame, MB_UV_BYTES, MB_Y_BYTES};
+
+        let mbs_per_frame = macroblocks_per_frame(width, height)
+            .map_err(|e| anyhow::anyhow!("macroblocks_per_frame: {e}"))?;
+        let mb_start = frame_start * mbs_per_frame;
+        let mb_end = frame_end.min(num_frames) * mbs_per_frame;
+
+        let mid_y = &orig_y[mb_start * MB_Y_BYTES..mb_end * MB_Y_BYTES];
+        let mid_u = &orig_u[mb_start * MB_UV_BYTES..mb_end * MB_UV_BYTES];
+        let mid_v = &orig_v[mb_start * MB_UV_BYTES..mb_end * MB_UV_BYTES];
+        let blocks = macroblock_streams_to_blocks(mid_y, mid_u, mid_v);
+
+        if blocks.is_empty() {
+            bail!(
+                "touched window contains zero macroblocks — check \
+                 --redact-frame-start/--redact-frame-end"
+            );
+        }
+        if blocks.len() % blocks_per_step != 0 {
+            bail!(
+                "touched window has {} macroblocks, not evenly divisible by \
+                 --blocks-per-step {blocks_per_step}. --blocks-per-step {mbs_per_frame} \
+                 (one frame per Nova step) always works, since {} is a multiple of \
+                 {mbs_per_frame} macroblocks/frame by construction.",
+                blocks.len(),
+                blocks.len(),
+            );
+        }
+
+        return prove_nova_groth16_redact(
+            blocks,
+            blocks_per_step,
+            width,
+            height,
+            num_frames,
+            *x,
+            *y,
+            *w,
+            *h,
+            frame_start,
+            frame_end.min(num_frames),
+            *fill_y,
+            mb_start,
+        );
+    }
+
     let blocks = macroblock_streams_to_blocks(orig_y, orig_u, orig_v);
 
     match gadget {
@@ -659,6 +894,7 @@ fn prove_with_eva(
             *frame_start,
             *frame_end,
             *fill_y,
+            0,
         ),
     }
 }
@@ -1018,6 +1254,7 @@ fn prove_nova_groth16_redact(
     frame_start: usize,
     frame_end: usize,
     fill_y: u8,
+    mb_offset: usize,
 ) -> Result<Vec<u8>> {
     use video::edit::constraints::RedactRect;
     use video::macroblock_yuv::macroblocks_per_frame;
@@ -1036,7 +1273,7 @@ fn prove_nova_groth16_redact(
             (0..n)
                 .map(|j| {
                     build_redact_rect_cfg(
-                        base_mb + j,
+                        base_mb + j + mb_offset,
                         width,
                         height,
                         mbs_per_frame,
