@@ -46,7 +46,7 @@ sha2       = "0.10"
 # Eva backend — optional, gated on `eva-backend` feature.
 # Pinned to a specific commit for reproducibility.
 video = { git = "https://github.com/miha-stopar/eva", package = "video",
-          rev = "a559ac8a05643c5edbbc169605a1fe3eca5908b0", optional = true }
+          rev = "2fb3eabd3d8e5493457a3f5ddea3259968c99d01", optional = true }
 
 # Arkworks deps used directly in the prover (same versions as Eva's video crate).
 # Only compiled when `eva-backend` is enabled.
@@ -62,7 +62,7 @@ ark-crypto-primitives    = { version = "^0.5.0", default-features = false,
                              features = ["r1cs","sponge","crh"], optional = true }
 folding-schemes          = { git = "https://github.com/miha-stopar/eva",
                              package = "folding-schemes",
-                             rev = "a559ac8a05643c5edbbc169605a1fe3eca5908b0",
+                             rev = "2fb3eabd3d8e5493457a3f5ddea3259968c99d01",
                              default-features = false,
                              features = ["cpu", "parallel"],
                              optional = true }

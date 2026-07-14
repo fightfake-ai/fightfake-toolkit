@@ -387,34 +387,36 @@ The exact rectangle and frame range are recorded in the `org.zkedit.edit_proof` 
 
 **Proof modes.** Without `--features eva-backend`, `redact` still produces a real edit, real
 h1/h2, and signed C2PA manifests, but the proof is a 32-byte stub. Build with
-`--features eva-backend` for a real Nova IVC + Groth16 proof over Eva's `Masking` gadget,
-with a per-macroblock `MaskCfg` that varies by frame and position inside the redaction box.
-The `Masking` circuit is heavier than `brightness`/`grayscale`/`invert` — if proving runs out
-of memory, lower `--blocks-per-step` (e.g. `4` instead of the default `256`).
+`--features eva-backend` for a real Nova IVC + Groth16 proof over Eva's `RedactRect` gadget,
+with a compact per-macroblock config (`RedactRectCfg`) derived from the declared rectangle and
+frame window. Macroblocks fully inside the box use a single plane-wide replace flag (like
+`Removing`); edge macroblocks carry only the per-pixel replace bits they need — not a full
+384-entry `(fill, replace?)` mask. This keeps the h2 config hash and witness count much
+smaller than the generic `Masking` gadget.
 
-#### How `redact` maps onto Eva's `Masking` gadget
+#### How `redact` maps onto Eva's `RedactRect` gadget
 
-Eva's `Masking` edit gadget (`video/src/edit/constraints.rs`) already provides the primitive
-`redact` needs: its config, `MaskCfg`, is a per-macroblock triple of `(fill value, replace?)`
-pairs — one for each of the 16×16 luma samples and each of the two 8×8 chroma planes — and
-`edit_native`/`edit_circuit` apply it pixel-by-pixel: substitute the fill value where
-`replace` is true, pass the original pixel through otherwise. That is a provable,
-per-pixel-selectable blackout.
+Eva's `RedactRect` edit gadget (`video/src/edit/constraints.rs`) takes a compact
+`RedactRectCfg` per macroblock: rectangle bounds (clamped to the frame), macroblock origin,
+whether the current frame is inside `[frame_start, frame_end)`, fill luma, and either
+`full_y`/`full_u`/`full_v` (whole 16×16 / 8×8 plane replaced) or a sparse partial bitmask
+on edge macroblocks only. Native and circuit paths apply the same logic: chroma is always
+filled with neutral 128 inside the box.
 
-`MaskCfg` carries no frame number, because it doesn't need one. Eva's Nova IVC walks
+`RedactRectCfg` carries no frame number, because it doesn't need one. Eva's Nova IVC walks
 macroblocks in one long, strictly-ordered sequence — global index
 `= frame_index × macroblocks_per_frame + macroblock_index` (see `yuv420_to_macroblocks` /
 `macroblocks_to_yuv420` in `video/src/macroblock_yuv.rs`) — and `fs.prove_step(...)` can
-already be given a different `MaskCfg` per macroblock within each step. Temporal and spatial
+already be given a different config per macroblock within each step. Temporal and spatial
 targeting of a redaction box therefore falls out entirely from *which config is supplied at
 which position in that sequence*; since width/height/frame count are public, the position ⇔
 `(frame, row, col)` mapping is unambiguous to a verifier too.
 
 With `--features eva-backend`, `prove-edit` builds that config per macroblock at prove time:
-for each Nova step it computes which macroblocks fall inside `(x, y, w, h)` during
-`[frame_start, frame_end)` and emits a `MaskCfg` with `replace=true, value=fill_y` for exactly
-those pixels and `replace=false` elsewhere. The native edit path uses the same `Masking`
-gadget, so h2 from the reference edit matches what the circuit proves.
+for each Nova step it calls `RedactRectCfg::from_rectangle(...)` for each macroblock index,
+using the macroblock's pixel origin and the declared `(x, y, w, h)` / frame range. The native
+edit path uses the same `RedactRect` gadget, so h2 from the reference edit matches what the
+circuit proves.
 
 #### Proving only the touched time window
 
@@ -424,8 +426,8 @@ macroblocks per frame, × 168 frames = **5,443,200 macroblocks** for the whole 7
 redaction only touches frames 52–64 (12 frames). Running the full Nova IVC + Groth16 decider
 over 5.4M macroblocks to prove a 12-frame edit is not a proportionate cost.
 
-The key observation: outside the redacted window, `MaskCfg` is the identity (`replace=false`
-everywhere) — i.e. "prove that edited pixel = original pixel" for those macroblocks. But that
+The key observation: outside the redacted window, `RedactRectCfg` is the identity (no pixels
+replaced) — i.e. "prove that edited pixel = original pixel" for those macroblocks. But that
 specific claim ("these bytes are exactly these other bytes") is exactly what a **plain hash**
 already proves — you don't need a SNARK to prove `A = A`; you only need the SNARK to constrain
 the macroblocks that actually changed, so a verifier can be sure the *only* change is the
@@ -436,7 +438,7 @@ Concretely, split the macroblock sequence into three segments and treat them dif
 | segment | frames | macroblocks | how it's attested |
 |---|---|---|---|
 | PRE  | 0–51    | 1,652,400 | plain hash over the raw bytes (no circuit) |
-| TOUCHED | 52–63 | 388,800 (or as few as ~16,896 if scoped to just the macroblocks the box overlaps) | real Nova IVC + Groth16, `MaskCfg` varying per macroblock |
+| TOUCHED | 52–63 | 388,800 (or as few as ~16,896 if scoped to just the macroblocks the box overlaps) | real Nova IVC + Groth16, `RedactRectCfg` varying per macroblock |
 | POST | 64–167  | 3,402,000 | plain hash over the raw bytes (no circuit) |
 
 The published `h1`/`h2` become small hash-chains over the three pieces, e.g.
@@ -1164,8 +1166,8 @@ the most likely paths forward for production deployments.
 - [ ] Level 1 Raspberry Pi demonstrator (`docs/level1-pi-demonstrator.md`)
 - [ ] Crop/padding gadget to handle non-16-aligned captures provably (see above)
 - [x] Wire the `redact` gadget to `--features eva-backend`: per-macroblock/per-frame varying
-      `MaskCfg` in the Nova IVC loop (see [_how redact maps onto Eva's Masking
-      gadget_](#how-redact-maps-onto-evas-masking-gadget))
+      `RedactRectCfg` in the Nova IVC loop (see [_how redact maps onto Eva's RedactRect
+      gadget_](#how-redact-maps-onto-evas-redactrect-gadget))
 - [ ] "Prove only the touched time window, hash-anchor the rest": don't run the ZK prover over
       an entire multi-thousand-macroblock clip just to redact a couple of seconds of it — see
       [_proving only the touched time window_](#proving-only-the-touched-time-window) above

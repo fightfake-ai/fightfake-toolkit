@@ -663,13 +663,13 @@ fn prove_with_eva(
     }
 }
 
-/// Build a per-macroblock [`MaskCfg`] for the `redact` gadget.
+/// Build a per-macroblock [`RedactRectCfg`] for the `redact` gadget.
 ///
 /// `global_mb` is the macroblock's index in Eva's linear order (frame-major,
 /// row-major within each frame). Pixels inside `[x, x+w) × [y, y+h)` during
 /// frames `[frame_start, frame_end)` are marked for replacement.
 #[cfg(feature = "eva-backend")]
-fn build_redact_mask_cfg(
+fn build_redact_rect_cfg(
     global_mb: usize,
     width: usize,
     height: usize,
@@ -681,9 +681,8 @@ fn build_redact_mask_cfg(
     frame_start: usize,
     frame_end: usize,
     fill_y: u8,
-) -> video::edit::constraints::MaskCfg {
-    use ndarray::Array2;
-    use video::edit::constraints::MaskCfg;
+) -> video::edit::constraints::RedactRectCfg {
+    use video::edit::constraints::RedactRectCfg;
     use video::macroblock_yuv::macroblock_xy;
 
     let frame = global_mb / mbs_per_frame;
@@ -693,31 +692,24 @@ fn build_redact_mask_cfg(
     let origin_y = mb_y * 16;
 
     let in_frame_range = frame >= frame_start && frame < frame_end;
-
     let x1 = x.min(width);
     let y1 = y_off.min(height);
     let x2 = (x + w).min(width);
     let y2 = (y_off + h).min(height);
 
-    let y_mask = Array2::from_shape_fn((16, 16), |(m, n)| {
-        let px = origin_x + m;
-        let py = origin_y + n;
-        let in_box = in_frame_range && px >= x1 && px < x2 && py >= y1 && py < y2;
-        (fill_y, in_box)
-    });
-
-    let u_mask = Array2::from_shape_fn((8, 8), |(m, n)| {
-        let px = origin_x + m * 2;
-        let py = origin_y + n * 2;
-        let in_box = in_frame_range && px >= x1 && px < x2 && py >= y1 && py < y2;
-        (128u8, in_box)
-    });
-    let v_mask = u_mask.clone();
-
-    MaskCfg(y_mask, u_mask, v_mask)
+    RedactRectCfg::from_rectangle(
+        origin_x,
+        origin_y,
+        in_frame_range,
+        x1,
+        y1,
+        x2,
+        y2,
+        fill_y,
+    )
 }
 
-/// Apply Eva's [`Masking`] gadget per macroblock — reference path that matches
+/// Apply Eva's [`RedactRect`] gadget per macroblock — native path that matches
 /// the in-circuit edit for `redact`.
 #[cfg(feature = "eva-backend")]
 #[allow(clippy::too_many_arguments)]
@@ -736,7 +728,7 @@ fn native_redact_edit_macroblocks(
     frame_end: usize,
     fill_y: u8,
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> {
-    use video::edit::constraints::{EditGadget, Masking};
+    use video::edit::constraints::{EditGadget, RedactRect};
     use video::encode::Matrix;
     use video::macroblock_yuv::{macroblocks_per_frame, MB_UV_BYTES, MB_Y_BYTES};
 
@@ -757,7 +749,7 @@ fn native_redact_edit_macroblocks(
     let mut out_v = vec![0u8; need_uv];
 
     for global in 0..total_mbs {
-        let cfg = build_redact_mask_cfg(
+        let cfg = build_redact_rect_cfg(
             global,
             width,
             height,
@@ -781,7 +773,7 @@ fn native_redact_edit_macroblocks(
             orig_v[global * MB_UV_BYTES..(global + 1) * MB_UV_BYTES].to_vec(),
         );
 
-        let (y, u, v) = Masking::edit_native(&y, &u, &v, &cfg);
+        let (y, u, v) = RedactRect::edit_native(&y, &u, &v, &cfg);
 
         let y_arr: [u8; MB_Y_BYTES] = y.iter().copied().collect::<Vec<_>>().try_into().unwrap();
         let u_arr: [u8; MB_UV_BYTES] = u.iter().copied().collect::<Vec<_>>().try_into().unwrap();
@@ -1027,7 +1019,7 @@ fn prove_nova_groth16_redact(
     frame_end: usize,
     fill_y: u8,
 ) -> Result<Vec<u8>> {
-    use video::edit::constraints::Masking;
+    use video::edit::constraints::RedactRect;
     use video::macroblock_yuv::macroblocks_per_frame;
 
     let mbs_per_frame = macroblocks_per_frame(width, height)
@@ -1037,13 +1029,13 @@ fn prove_nova_groth16_redact(
     run_nova_groth16!(
         blocks,
         blocks_per_step,
-        Masking,
-        video::edit::constraints::MaskCfg::default(),
+        RedactRect,
+        video::edit::constraints::RedactRectCfg::default(),
         |step: usize, n: usize| {
             let base_mb = step * n;
             (0..n)
                 .map(|j| {
-                    build_redact_mask_cfg(
+                    build_redact_rect_cfg(
                         base_mb + j,
                         width,
                         height,
