@@ -287,8 +287,10 @@ Measured on an Apple M1 MacBook Pro.  To reproduce on your machine:
 ./bench.sh testdata/videos/input/bank-robbery-original.mp4 3
 ```
 
-With `--features eva-backend`, the "ZK proving" row dominates and typically takes
-several minutes for a 5-second 1920×1072 clip on an M1 Mac.
+With `--features eva-backend`, the "ZK proving" row dominates. For a 5-second 1920×1072
+clip that is typically several minutes on an M1 Mac; for a 4K redact with `--touched-window`
+see the [measured `demos1` results](#measured-results-demos1-touched-window)
+(~88–92 minutes for 12 touched frames on an M1 MacBook Pro, depending on `--blocks-per-step`).
 
 ### Step 2b — editing only a small region for a couple of seconds (`redact`)
 
@@ -438,6 +440,8 @@ sequence into three segments around `[--redact-frame-start, --redact-frame-end)`
 differently.
 
 ```bash
+cargo build -p fightfake-cli --release --features eva-backend
+
 ./target/release/fightfake prove-edit \
   --input testdata/videos/input/demos1.mp4 \
   --gadget redact \
@@ -445,7 +449,8 @@ differently.
   --redact-frame-start 52 --redact-frame-end 64 \
   --redact-fill 0 \
   --touched-window \
-  --out-dir out/demos1
+  --blocks-per-step 64 \
+  --out-dir out/demos1-tw
 ```
 
 | segment | frames | macroblocks | how it's attested |
@@ -494,6 +499,63 @@ whole frames) would buy up to ~320× and remains a possible future refinement �
 fails fast with a clear error otherwise, rather than silently proving a truncated slice);
 `--blocks-per-step <macroblocks-per-frame>` (one full frame per Nova step) always works, since
 the touched window is always a whole number of frames.
+
+**Memory vs speed.** Peak RAM during Nova synthesis grows with `--blocks-per-step` (each step
+builds a larger in-memory circuit). On an Apple M1 MacBook Pro with `--features eva-backend`
+and the `demos1` touched window (388,800 macroblocks), observed behaviour:
+
+| `--blocks-per-step` | Nova steps | Result on M1 MacBook Pro |
+|---|---|---|
+| 64 | 6,075 | completes (~91.5 min total) |
+| 720 | 540 | completes (~87.9 min total) |
+| 1,620 | 240 | `zsh: killed` (OOM during Nova synthesis) |
+| 8,100 | 48 | `zsh: killed` (OOM during Nova synthesis) |
+| 32,400 (1 frame) | 12 | `zsh: killed` (OOM during Nova synthesis) |
+
+If the process exits with `zsh: killed` and no Rust backtrace, macOS almost certainly ran out
+of RAM and terminated the prover. Pick a smaller `--blocks-per-step` (must still divide
+388,800 evenly — e.g. 720, 540, 480, 320, 160, 96, 80, 64) or close other memory-heavy apps.
+The default `256` does **not** divide 388,800 and will be rejected. On this hardware, raising
+`--blocks-per-step` from 64 → 720 cuts Nova steps 11× but only saves ~4% proving time, because
+per-step cost grows with step size. The practical RAM ceiling sits between **720** (safe) and
+**1,620** (OOM) — use `720` as the working upper bound for 4K touched-window runs on a laptop.
+
+#### Measured results (demos1, touched window)
+
+Measured on an Apple M1 MacBook Pro with `--features eva-backend` and the command above
+(`--touched-window`, frames `[52, 64)` → 388,800 macroblocks in the MID segment):
+
+| Phase | 64 blocks/step (6,075 steps) | 720 blocks/step (540 steps) |
+|---|---|---|
+| ffmpeg decode | 0.99s | 1.52s |
+| macroblock tiling | 0.36s | 1.36s |
+| edit + hashing (h1, h2) | 34.52s | 37.55s |
+| ZK proving (Nova IVC + Groth16) | 5437.52s (~90.6 min) | 5218.91s (~87.0 min) |
+| ffmpeg re-encode | 10.08s | 10.44s |
+| C2PA signing | 0.20s | 0.21s |
+| **Total** | **5487.88s (~91.5 min)** | **5276.04s (~87.9 min)** |
+
+Both runs produce identical published hashes (confirms deterministic edit + segment combine):
+
+```
+h1 = 43bce49c8f1a482b325b6ed186df3bc83a59610c4d23cb4315430a924d11ca7c
+h2 = f05434d7b1d6f70bb97adf719dd07b9c0514557e5faaa871e259458ea1184317
+```
+
+Segment breakdown (frames `[52, 64)` of 168) — same for both runs:
+
+| segment | h1 | h2 |
+|---|---|---|
+| pre  | `b3809ea9c1606374fe0f5bcee16269d135a14ac2338255044070dde411c5ef93` | `b3809ea9c1606374fe0f5bcee16269d135a14ac2338255044070dde411c5ef93` |
+| mid  | `415f698753214d1cce677e492f3793b0e7a47aba53b4e89693fabcc3a45544dc` | `212fc9d3f0b4cc19a92b2c314a0dee6dace60585b90d4144da71a2edb1eeef57` |
+| post | `ef555c2dc95d81c3bb8315fac453fd133ad14d92e22b0af0e7ce77f407eafd28` | `ef555c2dc95d81c3bb8315fac453fd133ad14d92e22b0af0e7ce77f407eafd28` |
+
+The matching pre/post rows confirm that only the touched window differs between original and
+edited video; the mid segments differ because that is where the redaction ran. For the 64
+blocks/step run, Nova preprocess reported 6,865 variable-creation constraints, 135,988
+step-circuit constraints, and 58,469 fold-circuit constraints (13,361 primary + 45,108
+CycleFold). Both runs emit a 256-byte Groth16 proof (`out/demos1-tw/proof.bin`,
+`out/demos1-tw-720/proof.bin`).
 
 This only pays off because "untouched" has a cheap, well-defined meaning outside the circuit
 (byte-identical, provable by a plain hash). It would **not** help a gadget like `brightness`
