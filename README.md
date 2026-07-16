@@ -365,13 +365,56 @@ Two honest ways to actually cover a longer span:
 1. **Enlarge the box** enough to contain his whole range of motion across the window you want
    (verify frame-by-frame, the way this example was built — the box does not need to be
    tight, it only needs to stay wide enough for the whole window).
-2. **Track a moving box per frame** instead of one fixed rectangle — this is the "moving
-   region" item in the [Roadmap](#roadmap): once the CLI accepts a per-frame list of boxes
-   instead of a single one, occlusion by other things in the scene is still a hard limit, but
-   camera motion and small subject motion stop being one.
+2. **Track a moving box per frame** instead of one fixed rectangle — see
+   [_moving redact rectangle_](#moving-redact-rectangle---redact-track) below.
+   Occlusion by other things in the scene is still a hard limit, but camera motion and small
+   subject motion stop being one.
 
 Neither of these is specific to this toolkit — it's the same reason real redaction tools (e.g.
 newsroom face-blurring software) use frame-by-frame tracking rather than one static box.
+
+#### Moving redact rectangle (`--redact-track`)
+
+Instead of one fixed box for the whole `[--redact-frame-start, --redact-frame-end)` range, you
+can supply a sparse list of keyframes — `{frame, x, y, width, height}` — and the box is
+linearly interpolated between them (each of x/y/width/height independently). Before the first
+keyframe and after the last, that keyframe's box is held constant, so you don't have to supply
+one keyframe per frame — a handful of points along the subject's path is enough.
+
+```json
+[
+  { "frame": 52, "x": 2200, "y": 1200, "width": 512, "height": 704 },
+  { "frame": 58, "x": 2464, "y": 1312, "width": 512, "height": 704 },
+  { "frame": 63, "x": 2700, "y": 1400, "width": 512, "height": 704 }
+]
+```
+
+```bash
+./target/release/fightfake prove-edit \
+  --input testdata/videos/input/demos1.mp4 \
+  --gadget redact \
+  --redact-track path/to/track.json \
+  --redact-frame-start 52 --redact-frame-end 64 \
+  --redact-fill 0 \
+  --out-dir out/demos1-track
+```
+
+`--redact-track` overrides `--redact-x/-y/-width/-height` when set (you no longer need to pass
+those). Everything else about `redact` — the frame gate, the fill colour, `--touched-window` —
+works exactly the same; only *where* the box sits at each frame changes.
+
+**Proof cost is unaffected.** `RedactRectCfg` is already built per-macroblock, per-frame (see
+[_how redact maps onto Eva's RedactRect gadget_](#how-redact-maps-onto-evas-redactrect-gadget));
+a moving box only changes the *values* fed into that per-macroblock config (which pixels count
+as "inside the box" for a given frame), not the R1CS shape, the number of Nova steps, the
+witness/commitment layout, or the resulting proof size. A tracked redaction over the same frame
+range as a fixed-box redaction costs the same to prove.
+
+The recorded `gadget_params` reflect this — instead of a single `x`/`y`/`w`/`h`, they carry the
+`track` array verbatim, and the rendered `c2pa.actions` description reads e.g.:
+
+> Blacked out a moving pixel region (tracked across 3 keyframe(s)), frames 52–64 only (fill
+> value 0). All other pixels and frames are unchanged.
 
 **What this buys you over `brightness`/`grayscale`/`invert` on the whole clip:** h1/h2 still
 cover the *entire* video (nothing about the overall pipeline changes), but the declared edit —
@@ -1008,6 +1051,8 @@ fightfake prove-edit --input <VIDEO> [OPTIONS]
   --redact-y <N>           redact: top-left Y pixel of the rectangle  [default: 0]
   --redact-width <N>       redact: rectangle width in pixels  [default: 0 — must be set]
   --redact-height <N>      redact: rectangle height in pixels  [default: 0 — must be set]
+  --redact-track <FILE>    redact: JSON keyframe list for a moving box — overrides
+                           --redact-x/-y/-width/-height, see "Moving redact rectangle"
   --redact-frame-start <N> redact: first frame, inclusive, 0-based  [default: 0]
   --redact-frame-end <N>   redact: last frame, exclusive  [default: 0 — must be set]
   --redact-fill <N>        redact: luma fill value, 0-255 (0 = black)  [default: 0]
@@ -1280,9 +1325,9 @@ the most likely paths forward for production deployments.
       [_proving only the touched time window_](#proving-only-the-touched-time-window---touched-window)
       above for the construction and measured speedup. Scoping down further to just the
       macroblocks the box overlaps (rather than whole frames) is still open.
-- [ ] Track a moving region across frames (per-frame box list) instead of one fixed rectangle,
-      for subjects that move during the redacted window — see
-      [_picking a box on shaky, handheld footage_](#picking-a-box-on-shaky-handheld-footage)
+- [x] Track a moving region across frames (per-frame box list) instead of one fixed rectangle,
+      for subjects that move during the redacted window — `--redact-track <file>.json`, see
+      [_moving redact rectangle_](#moving-redact-rectangle---redact-track) below
 - [ ] A true blur/pixelate fill (currently `redact` only supports a solid fill colour)
 - [ ] Proof serialisation format and public key distribution specification
 - [ ] fightfake.ai integration guide for web developers

@@ -78,6 +78,94 @@ pub struct ProveEditConfig {
     pub touched_window_only: bool,
 }
 
+/// One control point of a moving redact rectangle: the box's exact position
+/// and size at a specific (absolute, 0-based) frame index.
+///
+/// Between two keyframes the box is linearly interpolated (each of
+/// `x`/`y`/`width`/`height` independently); before the first keyframe and
+/// after the last, the nearest keyframe's box is held constant. This is the
+/// on-disk shape for `--redact-track <file>.json`:
+///
+/// ```json
+/// [
+///   { "frame": 52, "x": 2200, "y": 1290, "width": 512, "height": 704 },
+///   { "frame": 58, "x": 2464, "y": 1312, "width": 512, "height": 704 },
+///   { "frame": 63, "x": 2760, "y": 1330, "width": 512, "height": 704 }
+/// ]
+/// ```
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize)]
+pub struct RectKeyframe {
+    pub frame: usize,
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+/// Where the redact rectangle sits at each frame: either one fixed box for
+/// the whole `[frame_start, frame_end)` range (today's behaviour), or a
+/// moving box defined by a sparse list of keyframes.
+///
+/// Proof cost is unaffected by which variant is used: `RedactRectCfg` is
+/// already built per-macroblock, per-frame — a moving box only changes the
+/// *values* fed into that per-macroblock config, not the R1CS shape, the
+/// number of Nova steps, or the proof size. See README § "Moving redact
+/// rectangle".
+#[derive(Debug, Clone)]
+pub enum RedactRectSpec {
+    Fixed { x: usize, y: usize, w: usize, h: usize },
+    Track(Vec<RectKeyframe>),
+}
+
+impl RedactRectSpec {
+    /// Validate and build a `Track` from user-supplied keyframes: sorts by
+    /// frame and rejects an empty list or duplicate frame numbers.
+    pub fn from_keyframes(mut keyframes: Vec<RectKeyframe>) -> Result<Self> {
+        if keyframes.is_empty() {
+            bail!("--redact-track file must contain at least one keyframe");
+        }
+        keyframes.sort_by_key(|k| k.frame);
+        for pair in keyframes.windows(2) {
+            if pair[0].frame == pair[1].frame {
+                bail!(
+                    "--redact-track has two keyframes at frame {} — each keyframe \
+                     needs a distinct frame number",
+                    pair[0].frame
+                );
+            }
+        }
+        Ok(RedactRectSpec::Track(keyframes))
+    }
+
+    /// Resolve the box `(x, y, w, h)` active at `frame` (absolute, 0-based).
+    pub fn at_frame(&self, frame: usize) -> (usize, usize, usize, usize) {
+        match self {
+            RedactRectSpec::Fixed { x, y, w, h } => (*x, *y, *w, *h),
+            RedactRectSpec::Track(keyframes) => {
+                // Sorted + non-empty by construction (`from_keyframes`).
+                let first = &keyframes[0];
+                if frame <= first.frame {
+                    return (first.x, first.y, first.width, first.height);
+                }
+                let last = &keyframes[keyframes.len() - 1];
+                if frame >= last.frame {
+                    return (last.x, last.y, last.width, last.height);
+                }
+                // `frame` is strictly between the first and last keyframe, so
+                // this always finds a bracketing pair `[a, b)`.
+                let idx = keyframes.partition_point(|k| k.frame <= frame) - 1;
+                let a = &keyframes[idx];
+                let b = &keyframes[idx + 1];
+                let t = (frame - a.frame) as f64 / (b.frame - a.frame) as f64;
+                let lerp = |v0: usize, v1: usize| -> usize {
+                    (v0 as f64 + (v1 as f64 - v0 as f64) * t).round() as usize
+                };
+                (lerp(a.x, b.x), lerp(a.y, b.y), lerp(a.width, b.width), lerp(a.height, b.height))
+            }
+        }
+    }
+}
+
 /// Supported edit operations.
 #[derive(Debug, Clone)]
 pub enum Gadget {
@@ -87,18 +175,18 @@ pub enum Gadget {
     Grayscale,
     /// Invert all channels: pixel = 255 − pixel.
     Invert,
-    /// Redact (blackout) a fixed pixel rectangle, only for a limited frame range.
+    /// Redact (blackout) a pixel rectangle, only for a limited frame range.
     ///
-    /// `[x, x+w) × [y, y+h)` is overwritten with `fill_y` (luma) and neutral
-    /// chroma (128) for frames `[frame_start, frame_end)`.  All other pixels
-    /// and all other frames are left byte-for-byte unchanged.  This is the
-    /// right primitive for e.g. blurring/blacking out one face for a couple
-    /// of seconds without editing (or having to prove) the rest of the clip.
+    /// `rect.at_frame(f)` gives the box `[x, x+w) × [y, y+h)` overwritten with
+    /// `fill_y` (luma) and neutral chroma (128) for each frame `f` in
+    /// `[frame_start, frame_end)` — a fixed box for every frame
+    /// (`RedactRectSpec::Fixed`) or a per-frame interpolated box
+    /// (`RedactRectSpec::Track`). All other pixels and all other frames are
+    /// left byte-for-byte unchanged. This is the right primitive for e.g.
+    /// blurring/blacking out one face for a couple of seconds without
+    /// editing (or having to prove) the rest of the clip.
     Redact {
-        x: usize,
-        y: usize,
-        w: usize,
-        h: usize,
+        rect: RedactRectSpec,
         frame_start: usize,
         frame_end: usize,
         fill_y: u8,
@@ -121,12 +209,23 @@ impl Gadget {
         match self {
             Gadget::Brightness { scale } => Some(serde_json::json!({ "scale": scale })),
             Gadget::Grayscale | Gadget::Invert => None,
-            Gadget::Redact { x, y, w, h, frame_start, frame_end, fill_y } => {
-                Some(serde_json::json!({
-                    "x": x, "y": y, "w": w, "h": h,
+            Gadget::Redact { rect, frame_start, frame_end, fill_y } => {
+                let mut obj = serde_json::json!({
                     "frame_start": frame_start, "frame_end": frame_end,
                     "fill_y": fill_y,
-                }))
+                });
+                match rect {
+                    RedactRectSpec::Fixed { x, y, w, h } => {
+                        obj["x"] = serde_json::json!(x);
+                        obj["y"] = serde_json::json!(y);
+                        obj["w"] = serde_json::json!(w);
+                        obj["h"] = serde_json::json!(h);
+                    }
+                    RedactRectSpec::Track(keyframes) => {
+                        obj["track"] = serde_json::json!(keyframes);
+                    }
+                }
+                Some(obj)
             }
         }
     }
@@ -493,12 +592,12 @@ fn apply_edit_and_hash(
             let h2 = sha256_hex(&ey, &eu, &ev);
             Ok((ey, eu, ev, h1, h2))
         }
-        Gadget::Redact { x, y, w, h, frame_start, frame_end, fill_y } => {
+        Gadget::Redact { rect, frame_start, frame_end, fill_y } => {
             #[cfg(feature = "eva-backend")]
             {
                 let (ey, eu, ev) = native_redact_edit_macroblocks(
                     orig_y, orig_u, orig_v, width, height, num_frames,
-                    *x, *y, *w, *h, *frame_start, *frame_end, *fill_y,
+                    rect, *frame_start, *frame_end, *fill_y,
                 )
                 .map_err(|e| anyhow::anyhow!("redact edit: {e}"))?;
                 let h2 = sha256_hex(&ey, &eu, &ev);
@@ -508,7 +607,7 @@ fn apply_edit_and_hash(
             {
                 let (ey, eu, ev) = redact_native(
                     orig_y, orig_u, orig_v, width, height, num_frames,
-                    *x, *y, *w, *h, *frame_start, *frame_end, *fill_y,
+                    rect, *frame_start, *frame_end, *fill_y,
                 );
                 let h2 = sha256_hex(&ey, &eu, &ev);
                 Ok((ey, eu, ev, h1, h2))
@@ -661,12 +760,12 @@ fn invert_native(y: &[u8], u: &[u8], v: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     (inv(y), inv(u), inv(v))
 }
 
-/// Redact: overwrite the pixel rectangle `[x, x+w) × [y, y+h)` with `fill_y`
-/// luma and neutral (128) chroma, only for frames `[frame_start, frame_end)`.
+/// Redact: overwrite the pixel rectangle `rect.at_frame(f)` with `fill_y`
+/// luma and neutral (128) chroma, only for frames `[frame_start, frame_end)`
+/// — a fixed box for every frame, or a per-frame interpolated (moving) box.
 /// Everything else — every other pixel, every other frame — is copied through
 /// byte-for-byte unchanged.  Requires frame-sequential planar `y`/`u`/`v`
 /// buffers, i.e. the output of `split_yuv` above.
-#[allow(clippy::too_many_arguments)]
 fn redact_native(
     y: &[u8],
     u: &[u8],
@@ -674,10 +773,7 @@ fn redact_native(
     width: usize,
     height: usize,
     num_frames: usize,
-    x: usize,
-    y_off: usize,
-    w: usize,
-    h: usize,
+    rect: &RedactRectSpec,
     frame_start: usize,
     frame_end: usize,
     fill_y: u8,
@@ -688,21 +784,23 @@ fn redact_native(
 
     let chroma_w = width / 2;
     let chroma_h = height / 2;
-
-    // Clamp the rectangle to the frame bounds; clamp the frame range to the
-    // clip length.  Chroma (4:2:0) is subsampled 2×2, so the luma rectangle
-    // maps to a chroma rectangle at half the coordinates and half the size.
-    let x1 = x.min(width);
-    let y1 = y_off.min(height);
-    let x2 = (x + w).min(width);
-    let y2 = (y_off + h).min(height);
-    let cx1 = x1 / 2;
-    let cy1 = y1 / 2;
-    let cx2 = x2.div_ceil(2);
-    let cy2 = y2.div_ceil(2);
     let f_end = frame_end.min(num_frames);
 
     for f in frame_start.min(f_end)..f_end {
+        let (x, y_off, w, h) = rect.at_frame(f);
+
+        // Clamp the rectangle to the frame bounds.  Chroma (4:2:0) is
+        // subsampled 2×2, so the luma rectangle maps to a chroma rectangle at
+        // half the coordinates and half the size.
+        let x1 = x.min(width);
+        let y1 = y_off.min(height);
+        let x2 = (x + w).min(width);
+        let y2 = (y_off + h).min(height);
+        let cx1 = x1 / 2;
+        let cy1 = y1 / 2;
+        let cx2 = x2.div_ceil(2);
+        let cy2 = y2.div_ceil(2);
+
         let y_base = f * width * height;
         for row in y1..y2 {
             let row_start = y_base + row * width;
@@ -816,7 +914,7 @@ fn prove_with_eva(
     touched_window: Option<(usize, usize)>,
 ) -> Result<Vec<u8>> {
     if let Some((frame_start, frame_end)) = touched_window {
-        let Gadget::Redact { x, y, w, h, fill_y, .. } = gadget else {
+        let Gadget::Redact { rect, fill_y, .. } = gadget else {
             bail!("touched window proving is only implemented for the redact gadget");
         };
         use video::macroblock_yuv::{macroblocks_per_frame, MB_UV_BYTES, MB_Y_BYTES};
@@ -854,10 +952,7 @@ fn prove_with_eva(
             width,
             height,
             num_frames,
-            *x,
-            *y,
-            *w,
-            *h,
+            rect.clone(),
             frame_start,
             frame_end.min(num_frames),
             *fill_y,
@@ -874,10 +969,7 @@ fn prove_with_eva(
         Gadget::Grayscale => prove_nova_groth16_grayscale(blocks, blocks_per_step),
         Gadget::Invert => prove_nova_groth16_invert(blocks, blocks_per_step),
         Gadget::Redact {
-            x,
-            y,
-            w,
-            h,
+            rect,
             frame_start,
             frame_end,
             fill_y,
@@ -887,10 +979,7 @@ fn prove_with_eva(
             width,
             height,
             num_frames,
-            *x,
-            *y,
-            *w,
-            *h,
+            rect.clone(),
             *frame_start,
             *frame_end,
             *fill_y,
@@ -902,18 +991,17 @@ fn prove_with_eva(
 /// Build a per-macroblock [`RedactRectCfg`] for the `redact` gadget.
 ///
 /// `global_mb` is the macroblock's index in Eva's linear order (frame-major,
-/// row-major within each frame). Pixels inside `[x, x+w) × [y, y+h)` during
-/// frames `[frame_start, frame_end)` are marked for replacement.
+/// row-major within each frame). Pixels inside `rect.at_frame(frame)` during
+/// frames `[frame_start, frame_end)` are marked for replacement — `rect` may
+/// be a fixed box (every frame gets the same rectangle) or a moving box
+/// (`RedactRectSpec::Track`, interpolated per frame).
 #[cfg(feature = "eva-backend")]
 fn build_redact_rect_cfg(
     global_mb: usize,
     width: usize,
     height: usize,
     mbs_per_frame: usize,
-    x: usize,
-    y_off: usize,
-    w: usize,
-    h: usize,
+    rect: &RedactRectSpec,
     frame_start: usize,
     frame_end: usize,
     fill_y: u8,
@@ -928,6 +1016,7 @@ fn build_redact_rect_cfg(
     let origin_y = mb_y * 16;
 
     let in_frame_range = frame >= frame_start && frame < frame_end;
+    let (x, y_off, w, h) = rect.at_frame(frame);
     let x1 = x.min(width);
     let y1 = y_off.min(height);
     let x2 = (x + w).min(width);
@@ -948,7 +1037,6 @@ fn build_redact_rect_cfg(
 /// Apply Eva's [`RedactRect`] gadget per macroblock — native path that matches
 /// the in-circuit edit for `redact`.
 #[cfg(feature = "eva-backend")]
-#[allow(clippy::too_many_arguments)]
 fn native_redact_edit_macroblocks(
     orig_y: &[u8],
     orig_u: &[u8],
@@ -956,10 +1044,7 @@ fn native_redact_edit_macroblocks(
     width: usize,
     height: usize,
     num_frames: usize,
-    x: usize,
-    y_off: usize,
-    w: usize,
-    h: usize,
+    rect: &RedactRectSpec,
     frame_start: usize,
     frame_end: usize,
     fill_y: u8,
@@ -990,10 +1075,7 @@ fn native_redact_edit_macroblocks(
             width,
             height,
             mbs_per_frame,
-            x,
-            y_off,
-            w,
-            h,
+            rect,
             frame_start,
             f_end,
             fill_y,
@@ -1247,10 +1329,7 @@ fn prove_nova_groth16_redact(
     width: usize,
     height: usize,
     num_frames: usize,
-    x: usize,
-    y_off: usize,
-    w: usize,
-    h: usize,
+    rect: RedactRectSpec,
     frame_start: usize,
     frame_end: usize,
     fill_y: u8,
@@ -1277,10 +1356,7 @@ fn prove_nova_groth16_redact(
                         width,
                         height,
                         mbs_per_frame,
-                        x,
-                        y_off,
-                        w,
-                        h,
+                        &rect,
                         frame_start,
                         f_end,
                         fill_y,
@@ -1299,4 +1375,94 @@ fn sha256_hex(y: &[u8], u: &[u8], v: &[u8]) -> String {
     h.update(u);
     h.update(v);
     hex::encode(h.finalize())
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kf(frame: usize, x: usize, y: usize, width: usize, height: usize) -> RectKeyframe {
+        RectKeyframe { frame, x, y, width, height }
+    }
+
+    #[test]
+    fn fixed_rect_is_constant_across_frames() {
+        let rect = RedactRectSpec::Fixed { x: 10, y: 20, w: 30, h: 40 };
+        for f in [0, 1, 100, 1_000] {
+            assert_eq!(rect.at_frame(f), (10, 20, 30, 40));
+        }
+    }
+
+    #[test]
+    fn single_keyframe_track_is_constant() {
+        let rect = RedactRectSpec::from_keyframes(vec![kf(10, 5, 5, 100, 100)]).unwrap();
+        assert_eq!(rect.at_frame(0), (5, 5, 100, 100));
+        assert_eq!(rect.at_frame(10), (5, 5, 100, 100));
+        assert_eq!(rect.at_frame(999), (5, 5, 100, 100));
+    }
+
+    #[test]
+    fn track_holds_before_first_and_after_last() {
+        let rect = RedactRectSpec::from_keyframes(vec![
+            kf(50, 0, 0, 100, 100),
+            kf(60, 100, 100, 100, 100),
+        ])
+        .unwrap();
+        assert_eq!(rect.at_frame(0), (0, 0, 100, 100));
+        assert_eq!(rect.at_frame(50), (0, 0, 100, 100));
+        assert_eq!(rect.at_frame(60), (100, 100, 100, 100));
+        assert_eq!(rect.at_frame(1_000), (100, 100, 100, 100));
+    }
+
+    #[test]
+    fn track_linearly_interpolates_between_keyframes() {
+        let rect = RedactRectSpec::from_keyframes(vec![
+            kf(0, 0, 0, 100, 100),
+            kf(10, 100, 200, 100, 100),
+        ])
+        .unwrap();
+        assert_eq!(rect.at_frame(5), (50, 100, 100, 100));
+        assert_eq!(rect.at_frame(2), (20, 40, 100, 100));
+    }
+
+    #[test]
+    fn track_interpolates_across_multiple_segments() {
+        let rect = RedactRectSpec::from_keyframes(vec![
+            kf(0, 0, 0, 50, 50),
+            kf(10, 100, 0, 50, 50),
+            kf(20, 100, 100, 100, 100),
+        ])
+        .unwrap();
+        assert_eq!(rect.at_frame(0), (0, 0, 50, 50));
+        assert_eq!(rect.at_frame(10), (100, 0, 50, 50));
+        assert_eq!(rect.at_frame(15), (100, 50, 75, 75));
+        assert_eq!(rect.at_frame(20), (100, 100, 100, 100));
+    }
+
+    #[test]
+    fn from_keyframes_sorts_out_of_order_input() {
+        let rect = RedactRectSpec::from_keyframes(vec![
+            kf(10, 100, 100, 100, 100),
+            kf(0, 0, 0, 100, 100),
+        ])
+        .unwrap();
+        assert_eq!(rect.at_frame(0), (0, 0, 100, 100));
+        assert_eq!(rect.at_frame(10), (100, 100, 100, 100));
+    }
+
+    #[test]
+    fn from_keyframes_rejects_empty() {
+        assert!(RedactRectSpec::from_keyframes(vec![]).is_err());
+    }
+
+    #[test]
+    fn from_keyframes_rejects_duplicate_frames() {
+        let err = RedactRectSpec::from_keyframes(vec![
+            kf(5, 0, 0, 10, 10),
+            kf(5, 1, 1, 20, 20),
+        ]);
+        assert!(err.is_err());
+    }
 }

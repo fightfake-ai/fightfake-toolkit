@@ -20,7 +20,7 @@ use cert_gen::generate_test_cert;
 use demo::{run_level0_demo, Level0DemoConfig};
 use fightfake_core::verify::{verify_bundle, verify_capture_asset, verify_signed_assets};
 use pi_capture::LibcameraContract;
-use workflow::{run_prove_edit, Gadget, ProveEditConfig};
+use workflow::{run_prove_edit, Gadget, ProveEditConfig, RectKeyframe, RedactRectSpec};
 
 // ── CLI structure ─────────────────────────────────────────────────────────────
 
@@ -58,20 +58,36 @@ enum Command {
         gadget_param: u16,
 
         /// Redact: top-left X pixel coordinate of the rectangle to black out.
+        /// Ignored (and unnecessary) if `--redact-track` is set.
         #[arg(long, default_value = "0")]
         redact_x: usize,
 
         /// Redact: top-left Y pixel coordinate of the rectangle to black out.
+        /// Ignored (and unnecessary) if `--redact-track` is set.
         #[arg(long, default_value = "0")]
         redact_y: usize,
 
         /// Redact: width in pixels of the rectangle to black out.
+        /// Ignored (and unnecessary) if `--redact-track` is set.
         #[arg(long, default_value = "0")]
         redact_width: usize,
 
         /// Redact: height in pixels of the rectangle to black out.
+        /// Ignored (and unnecessary) if `--redact-track` is set.
         #[arg(long, default_value = "0")]
         redact_height: usize,
+
+        /// Redact: path to a JSON file describing a *moving* rectangle as a
+        /// sparse list of keyframes:
+        /// `[{ "frame": 52, "x": 2200, "y": 1290, "width": 512, "height": 704 }, ...]`.
+        /// Between keyframes the box is linearly interpolated (x/y/width/height
+        /// independently); before the first keyframe and after the last, that
+        /// keyframe's box is held constant. When set, this overrides
+        /// `--redact-x/-y/-width/-height`. Proof cost is identical to a fixed
+        /// rectangle covering the same frame range — see README §
+        /// "Moving redact rectangle".
+        #[arg(long)]
+        redact_track: Option<PathBuf>,
 
         /// Redact: first frame (inclusive, 0-based) covered by the redaction.
         #[arg(long, default_value = "0")]
@@ -356,6 +372,7 @@ fn main() -> Result<()> {
             redact_y,
             redact_width,
             redact_height,
+            redact_track,
             redact_frame_start,
             redact_frame_end,
             redact_fill,
@@ -371,10 +388,10 @@ fn main() -> Result<()> {
                 GadgetArg::Grayscale  => Gadget::Grayscale,
                 GadgetArg::Invert     => Gadget::Invert,
                 GadgetArg::Redact     => {
-                    if redact_width == 0 || redact_height == 0 || redact_frame_end == 0 {
+                    if redact_frame_end == 0 {
                         anyhow::bail!(
-                            "--gadget redact requires --redact-width, --redact-height, \
-                             and --redact-frame-end (exclusive) to be set (all > 0)"
+                            "--gadget redact requires --redact-frame-end (exclusive) \
+                             to be set (> 0)"
                         );
                     }
                     if redact_frame_start >= redact_frame_end {
@@ -383,11 +400,41 @@ fn main() -> Result<()> {
                              --redact-frame-end ({redact_frame_end})"
                         );
                     }
+                    let rect = match &redact_track {
+                        Some(track_path) => {
+                            let data = std::fs::read_to_string(track_path).with_context(|| {
+                                format!(
+                                    "failed to read --redact-track file {}",
+                                    track_path.display()
+                                )
+                            })?;
+                            let keyframes: Vec<RectKeyframe> = serde_json::from_str(&data)
+                                .with_context(|| {
+                                    format!(
+                                        "failed to parse --redact-track file {} as JSON \
+                                         (expected an array of {{frame,x,y,width,height}})",
+                                        track_path.display()
+                                    )
+                                })?;
+                            RedactRectSpec::from_keyframes(keyframes)?
+                        }
+                        None => {
+                            if redact_width == 0 || redact_height == 0 {
+                                anyhow::bail!(
+                                    "--gadget redact requires either --redact-track, or both \
+                                     --redact-width and --redact-height (all > 0)"
+                                );
+                            }
+                            RedactRectSpec::Fixed {
+                                x: redact_x,
+                                y: redact_y,
+                                w: redact_width,
+                                h: redact_height,
+                            }
+                        }
+                    };
                     Gadget::Redact {
-                        x: redact_x,
-                        y: redact_y,
-                        w: redact_width,
-                        h: redact_height,
+                        rect,
                         frame_start: redact_frame_start,
                         frame_end: redact_frame_end,
                         fill_y: redact_fill,

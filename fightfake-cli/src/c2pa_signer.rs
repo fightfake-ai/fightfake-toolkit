@@ -192,11 +192,19 @@ fn gadget_description(gadget_id: &str, params: Option<&serde_json::Value>) -> St
         ("invert", _) => "Colour invert (all channels: 255 − pixel)".to_owned(),
         ("redact", Some(p)) => {
             let g = |k: &str| p.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-            format!(
-                "Blacked out a {}×{} pixel region at ({}, {}), frames {}–{} only \
-                 (fill value {}). All other pixels and frames are unchanged.",
-                g("w"), g("h"), g("x"), g("y"), g("frame_start"), g("frame_end"), g("fill_y"),
-            )
+            match p.get("track").and_then(|v| v.as_array()) {
+                Some(track) => format!(
+                    "Blacked out a moving pixel region (tracked across {} keyframe(s)), \
+                     frames {}–{} only (fill value {}). All other pixels and frames are \
+                     unchanged.",
+                    track.len(), g("frame_start"), g("frame_end"), g("fill_y"),
+                ),
+                None => format!(
+                    "Blacked out a {}×{} pixel region at ({}, {}), frames {}–{} only \
+                     (fill value {}). All other pixels and frames are unchanged.",
+                    g("w"), g("h"), g("x"), g("y"), g("frame_start"), g("frame_end"), g("fill_y"),
+                ),
+            }
         }
         ("redact", None) => "Blacked out a pixel region for a limited frame range".to_owned(),
         (other, _) => format!("Edit gadget: {other}"),
