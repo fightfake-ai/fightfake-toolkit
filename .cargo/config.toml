@@ -1,0 +1,8 @@
+# wasm32 target config for `fightfake-wasm` (see its README doc comment for
+# the `wasm-pack build` invocation). `getrandom` 0.3+ requires this `--cfg`
+# in addition to its "wasm_js" Cargo feature (see
+# https://docs.rs/getrandom/latest/getrandom/#webassembly-support) — without
+# it, any dependency pulling in `getrandom` (directly or transitively) fails
+# to compile for `wasm32-unknown-unknown`.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]

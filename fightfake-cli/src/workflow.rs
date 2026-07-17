@@ -1123,7 +1123,6 @@ macro_rules! run_nova_groth16 {
         use ark_ff::{BigInteger, PrimeField, UniformRand, Zero};
         use ark_groth16::Groth16;
         use ark_grumpkin::{constraints::GVar as GVar2, Projective as Projective2};
-        use ark_serialize::CanonicalSerialize;
         use ark_snark::SNARK;
         use folding_schemes::{
             commitment::pedersen::Pedersen,
@@ -1200,6 +1199,10 @@ macro_rules! run_nova_groth16 {
         .context("Groth16 setup failed")?;
 
         let decider_vp = Groth16::<Bn254>::process_vk(&pk.vk).context("process_vk failed")?;
+        // `pk.vk` is regenerated fresh (from real randomness) on every run —
+        // this is a per-proof Groth16 setup, not a universal trusted setup —
+        // so it must travel with the proof for anyone to verify it later.
+        let vk_for_bundle = pk.vk.clone();
         let decider_pp = pk;
         let params = (pp, vp);
         let initial_state = vec![Fr::zero(), Fr::zero()];
@@ -1251,17 +1254,39 @@ macro_rules! run_nova_groth16 {
         let (groth_proof, cm_t, r) =
             Decider::prove(decider_pp, rng, circuit).context("Groth16 prove failed")?;
 
-        // Serialize the full decider bundle (Groth16 proof + Nova commitment data).
-        let mut proof_bytes = Vec::new();
-        groth_proof
-            .serialize_compressed(&mut proof_bytes)
-            .context("proof serialization failed")?;
-        cm_t.serialize_compressed(&mut proof_bytes)
-            .context("cmT serialization failed")?;
-        r.serialize_compressed(&mut proof_bytes)
-            .context("r serialization failed")?;
+        // Bundle the Groth16 proof together with everything else its
+        // verification needs (the per-proof vk, the folded Nova instances,
+        // the device key) into `proof.bin`'s on-disk format — see
+        // `fightfake_core::proof_bundle` for why all of this has to travel
+        // with the proof rather than being just `(groth_proof, cmT, r)`.
+        let bundle = fightfake_core::proof_bundle::ProofBundle {
+            num_steps: num_steps as u64,
+            z0: initial_state.clone(),
+            h2: last_state[1],
+            device_vk,
+            vk: vk_for_bundle,
+            u_running: fightfake_core::proof_bundle::FoldedInstance {
+                cm_e: U_i.cmE,
+                u: U_i.u,
+                cm_q: U_i.cmQ,
+                cm_w: U_i.cmW,
+            },
+            u_current: fightfake_core::proof_bundle::FoldedInstance {
+                cm_e: u_i.cmE,
+                u: u_i.u,
+                cm_q: u_i.cmQ,
+                cm_w: u_i.cmW,
+            },
+            proof: groth_proof.clone(),
+            cm_t,
+            r,
+        };
+        let proof_bytes = bundle
+            .to_bytes()
+            .map_err(|e| anyhow::anyhow!("proof bundle serialization failed: {e}"))?;
 
-        // Self-check.
+        // Self-check #1: Eva's own decider verify — the ground truth this
+        // proof was built against.
         let ok = Decider::verify(
             decider_vp,
             device_vk,
@@ -1275,6 +1300,24 @@ macro_rules! run_nova_groth16 {
         .context("Groth16 self-verify failed")?;
         if !ok {
             bail!("self-verification of generated proof failed");
+        }
+
+        // Self-check #2: the portable (WASM-buildable) reimplementation
+        // that `fightfake verify-proof` and the future browser extension
+        // actually run (see that module's doc comment for why it's a
+        // reimplementation rather than a direct call to `Decider::verify`)
+        // must agree, on every single proof generated — this is the
+        // regression net for that reimplementation, run automatically
+        // rather than trusted on faith.
+        let portable_ok = fightfake_core::proof_bundle::verify_proof_bundle(&bundle)
+            .map_err(|e| anyhow::anyhow!("portable proof-bundle self-verify errored: {e}"))?;
+        if !portable_ok {
+            bail!(
+                "portable proof-bundle verification (fightfake_core::proof_bundle, used by \
+                 `verify-proof` and the WASM binding) disagrees with the native decider \
+                 verify above — this is a bug in that reimplementation, not in the proof \
+                 itself; the proof was NOT written to disk"
+            );
         }
 
         anyhow::Ok(proof_bytes)

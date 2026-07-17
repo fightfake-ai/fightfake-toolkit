@@ -161,6 +161,21 @@ enum Command {
         proof: PathBuf,
     },
 
+    /// Cryptographically verify a proof.bin — the actual Nova IVC + Groth16
+    /// pairing checks, not just hash/manifest bookkeeping (that's what
+    /// `verify` does).
+    ///
+    /// Needs `--features crypto-verify` (implied by `eva-backend`) to
+    /// build; without it this prints an explanatory error instead of
+    /// running any check. A Level-0 stub `proof.bin` (32 zero bytes, from a
+    /// build without `--features eva-backend`) is correctly reported as
+    /// "not a cryptographic proof" rather than silently passing.
+    VerifyProof {
+        /// Proof binary file (proof.bin from a real, eva-backend prove-edit run).
+        #[arg(long)]
+        proof: PathBuf,
+    },
+
     /// Print the C2PA manifest embedded in a signed MP4 as formatted JSON.
     ///
     /// The manifest is stored inside the MP4 container (in a 'C2PA' BMFF box),
@@ -361,6 +376,10 @@ fn main() -> Result<()> {
         Command::Verify { capture, edited, proof } => {
             verify_signed_assets(&capture, &edited, &proof)?;
             println!("ok — h1 consistent, proof hash matches, C2PA manifests valid");
+        }
+
+        Command::VerifyProof { proof } => {
+            run_verify_proof(&proof)?;
         }
 
         // ── Full workflow ─────────────────────────────────────────────────────
@@ -660,6 +679,37 @@ fn main() -> Result<()> {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+#[cfg(feature = "crypto-verify")]
+fn run_verify_proof(proof_path: &PathBuf) -> Result<()> {
+    use fightfake_core::proof_bundle::{verify_proof_bundle, ProofBundle};
+
+    let bytes = std::fs::read(proof_path)
+        .with_context(|| format!("failed to read proof from {}", proof_path.display()))?;
+
+    let bundle = ProofBundle::from_bytes(&bytes).map_err(|e| anyhow::anyhow!(e))?;
+    println!("proof bundle parsed — {} Nova IVC step(s)", bundle.num_steps);
+
+    let ok = verify_proof_bundle(&bundle).map_err(|e| anyhow::anyhow!(e))?;
+    if ok {
+        println!("ok — Groth16 pairing check passed (h2 = {})", bundle.h2);
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "FAILED — proof bundle parsed but the Groth16 pairing check did not pass; this \
+             proof does not cryptographically attest to what it claims"
+        );
+    }
+}
+
+#[cfg(not(feature = "crypto-verify"))]
+fn run_verify_proof(_proof_path: &PathBuf) -> Result<()> {
+    anyhow::bail!(
+        "cryptographic proof verification requires `--features crypto-verify` (or \
+         `eva-backend`, which implies it) — this build only supports assertion/hash-level \
+         checks (`fightfake verify`), not the actual Groth16 pairing check"
+    );
+}
 
 fn write_json<T: serde::Serialize>(out: Option<PathBuf>, payload: &T) -> Result<()> {
     let json = serde_json::to_string_pretty(payload)?;

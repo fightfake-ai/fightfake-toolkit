@@ -631,19 +631,48 @@ If you only want to confirm that a video was signed at capture time, without che
 
 Prints the device ID, pipeline stage, and h1 fingerprint embedded at capture.
 
+### Step 4b — cryptographically verify the proof itself
+
+`verify` (above) checks hashes and C2PA signatures, but not the ZK proof's math. To run the
+actual Nova IVC + Groth16 pairing check:
+
+```bash
+./target/release/fightfake verify-proof --proof out/proof.bin
+```
+
+Needs `--features crypto-verify` (implied by `eva-backend`, since if you can prove you should
+be able to verify what you proved). Without it, this prints a clear error instead of silently
+skipping the check. A Level-0 stub `proof.bin` (32 zero bytes) is correctly reported as "not a
+cryptographic proof" rather than passing.
+
+Note `proof.bin` is now bigger than just the ~200–450-byte Groth16 SNARK proof mentioned
+elsewhere in this doc (megabytes, for a real clip) — Eva's Groth16 setup here is per-proof
+(fresh randomness on every `prove-edit` run), *not* a universal trusted setup, so the
+verifying key can't be assumed and shared out-of-band the way it would be for e.g. a
+production SNARK with a circuit-specific ceremony. `proof.bin` bundles that key together with
+the folded Nova instances and the compact SNARK proof itself, so anyone with just the one
+file can verify it — see `fightfake_core::proof_bundle::ProofBundle`.
+
 ### Step 5 — verify in the browser (WASM)
 
 Build the browser bundle:
 
 ```bash
 wasm-pack build fightfake-wasm --target web --release
-# output: fightfake-wasm/pkg/
+# output: fightfake-wasm/pkg/  (assertion/hash checks only, ~50 KB)
+
+# with real Groth16 verification too (~700 KB release, wasm-opt'd):
+wasm-pack build fightfake-wasm --target web --release --features crypto-verify
 ```
+
+`getrandom` (pulled in by the arkworks stack) needs its wasm32 browser-`crypto` backend
+enabled explicitly — see `.cargo/config.toml` at the repo root; `wasm-pack`/`cargo` pick it up
+automatically as long as you build from within this repository.
 
 Use it in a web page:
 
 ```js
-import init, { verifyAssertionLinkage } from './fightfake_wasm.js';
+import init, { verifyAssertionLinkage, verifyGroth16Proof } from './fightfake_wasm.js';
 await init();
 
 // captureJson / editJson: the org.zkedit.* assertion JSON strings
@@ -655,11 +684,24 @@ if (result.h1_matches && result.proof_sha_matches) {
 } else {
   console.log('Assertion linkage failed.');
 }
+
+// The actual cryptographic check (requires the `crypto-verify` build above).
+// Throws if proofBytes isn't a real proof bundle (e.g. a Level-0 stub);
+// otherwise returns true/false for whether the pairing check passed.
+try {
+  const cryptoOk = verifyGroth16Proof(proofBytes);
+  console.log(cryptoOk ? 'Proof cryptographically valid' : 'Proof INVALID');
+} catch (e) {
+  console.log('Not a cryptographic proof:', e.message);
+}
 ```
 
-What the browser checks today: h1 consistency between the two assertions and SHA-256 of the
-proof binary.  Cryptographic Groth16 verification (three pairing checks over BN254) is on the
-roadmap for a future WASM release.
+What the browser checks with the default build: h1 consistency between the two assertions and
+SHA-256 of the proof binary. With `--features crypto-verify`, `verifyGroth16Proof` additionally
+runs the real Groth16/Nova-decider pairing check — see "What WASM verification checks" below
+and `fightfake_core::proof_bundle`'s doc comment for why this is a from-scratch reimplementation
+of a small slice of Eva's decider math rather than a direct dependency on Eva's own prover crate
+(that crate hard-requires native threads and cannot target `wasm32-unknown-unknown` at all).
 
 ---
 
@@ -814,18 +856,22 @@ uploading proof files, which is more friction than installing an extension.
 
 **For full independence from fightfake.ai:** compile and run the CLI (Level E).
 
-**What WASM verification checks (current):**
-1. C2PA signature on both manifests is structurally valid.
-2. h1 in the capture assertion matches h1 in the edit-proof assertion.
-3. SHA-256 of `proof.bin` matches `proof_sha256` in the edit-proof assertion.
+**What WASM verification checks:**
+1. C2PA signature on both manifests is structurally valid (`verifyAssertionLinkage`).
+2. h1 in the capture assertion matches h1 in the edit-proof assertion (`verifyAssertionLinkage`).
+3. SHA-256 of `proof.bin` matches `proof_sha256` in the edit-proof assertion (`verifyAssertionLinkage`).
+4. **With `--features crypto-verify`:** the actual Groth16 pairing equations over BN254 —
+   the cryptographic heart of the ZK proof (`verifyGroth16Proof`). This is what makes browser
+   verification trustless rather than just consistent-looking: a stub proof (32 bytes of
+   zeros) is rejected outright, and a tampered-but-well-formed proof fails the pairing check
+   rather than silently passing.
 
-**What WASM verification does not yet check:**
-- The Groth16 pairing equations over BN254 (the cryptographic heart of the ZK proof).
-  This is the roadmap item that will make the browser verification truly trustless.  Until
-  then, a stub proof (32 bytes of zeros) and a real proof look the same to the WASM verifier.
+Without `crypto-verify`, `verifyGroth16Proof` always returns `false` (the pre-`crypto-verify`
+default build's behaviour) — checks 1–3 alone cannot distinguish a stub proof from a real one,
+so treat that build as convenience-tier, not security-tier, verification.
 
-The CLI will add cryptographic Groth16 verification (`verify-proof` command) in the same
-release as the full Eva backend.
+The CLI's equivalent is `fightfake verify-proof --proof proof.bin` (needs
+`--features crypto-verify`, implied by `eva-backend`) — see "Step 4b" above.
 
 ### C2PA online validator
 
@@ -1116,7 +1162,25 @@ fightfake verify --capture <FILE> --edited <FILE> --proof <FILE>
 ```
 
 Validates both C2PA manifests, checks h1 linkage, and confirms the proof binary matches the
-recorded SHA-256.
+recorded SHA-256. Does **not** run the ZK proof's own math — use `verify-proof` for that.
+
+### `verify-proof` — cryptographically verify a proof.bin
+
+```
+fightfake verify-proof --proof <FILE>
+```
+
+Runs the real Nova IVC + Groth16 pairing check on `proof.bin` — the same check
+`prove-edit --features eva-backend` self-verifies against right after generating a proof, and
+the same one `verifyGroth16Proof` runs in the browser (see `fightfake-wasm`'s `crypto-verify`
+feature). Needs `--features crypto-verify` (implied by `eva-backend`) to build; without it,
+prints an explanatory error rather than a false pass. Correctly rejects a Level-0 stub
+`proof.bin` (32 zero bytes) as "not a cryptographic proof" instead of silently accepting it.
+
+```bash
+cargo build -p fightfake-cli --release --features crypto-verify   # verify-only, no prover
+./target/release/fightfake verify-proof --proof out/proof.bin
+```
 
 ### `make-test-cert` — generate a test certificate
 
@@ -1312,8 +1376,13 @@ the most likely paths forward for production deployments.
 
 ## Roadmap
 
-- [ ] Cryptographic Groth16 verification in the CLI (`verify-proof` command)
-- [ ] WASM Groth16 verifier — `verifyGroth16Proof` for in-browser proof checking
+- [x] Cryptographic Groth16 verification in the CLI (`verify-proof` command) and in the browser
+      (`verifyGroth16Proof`, `fightfake-wasm`'s `crypto-verify` feature) — see
+      `fightfake_core::proof_bundle` and [Step 4b/5](#step-4b--cryptographically-verify-the-proof-itself)
+      above. Both call the same reimplementation of Eva's decider-verify math (not
+      `folding-schemes`/`video` directly — those hard-require native threads and cannot target
+      `wasm32-unknown-unknown`), cross-checked against Eva's own `Decider::verify` on every real
+      proof `prove-edit --features eva-backend` generates.
 - [ ] Level 1 Raspberry Pi demonstrator (`docs/level1-pi-demonstrator.md`)
 - [ ] Crop/padding gadget to handle non-16-aligned captures provably (see above)
 - [x] Wire the `redact` gadget to `--features eva-backend`: per-macroblock/per-frame varying

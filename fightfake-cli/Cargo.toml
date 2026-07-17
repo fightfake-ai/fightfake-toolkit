@@ -13,7 +13,8 @@ default = []
 # Enable the real Nova IVC + Groth16 prover (heavy; requires Eva's video crate).
 # Without this flag, `prove-edit` runs in Level-0 mode: edits and hashes the
 # video but emits a placeholder proof.  Use `--features eva-backend` to build
-# the cryptographic prover.
+# the cryptographic prover. Implies `crypto-verify` — if you can prove, you
+# should be able to verify what you just proved.
 eva-backend = [
     "dep:video",
     "dep:ndarray",
@@ -29,7 +30,15 @@ eva-backend = [
     "dep:folding-schemes",
     "dep:rand",
     "dep:rayon",
+    "crypto-verify",
 ]
+# Cryptographic Groth16/Nova-decider proof *verification* only (`verify-proof`
+# command) — no prover, no `video`/`folding-schemes`/`rayon`. This is the
+# lightweight side of `eva-backend`: the same arkworks-only verification path
+# `fightfake-wasm`'s `crypto-verify` feature uses, so anyone can check a
+# `proof.bin` someone else generated without needing Eva's full (heavier,
+# native-threads-only) proving stack installed.
+crypto-verify = ["fightfake-core/crypto-verify"]
 
 [dependencies]
 fightfake-core = { path = "../fightfake-core" }

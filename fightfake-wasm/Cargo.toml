@@ -7,8 +7,23 @@ description = "Browser-side WASM verifier for fightfake-toolkit proofs"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = []
+# Real (non-stub) Groth16/Nova-decider proof verification in the browser —
+# see fightfake-core's `crypto-verify` feature and `proof_bundle` module for
+# what this pulls in and why. Off by default because the arkworks stack adds
+# real weight to the WASM bundle; enable for the actual browser-extension
+# build.
+crypto-verify = ["fightfake-core/crypto-verify"]
+
 [dependencies]
-fightfake-core = { path = "../fightfake-core" }
+# `default-features = false`: skip fightfake-core's `native-verify` (C2PA +
+# JSON-schema checks) — this crate never calls into it (it reads
+# `org.zkedit.*` assertions directly as JSON, see lib.rs) and it does not
+# build for wasm32 (c2pa pulls in `ring`/`reqwest`, jsonschema pulls in
+# `reqwest::blocking`/`url::to_file_path`, none of which target
+# `wasm32-unknown-unknown`).
+fightfake-core = { path = "../fightfake-core", default-features = false }
 
 wasm-bindgen      = "0.2"
 serde             = { version = "1", features = ["derive"] }
@@ -17,6 +32,13 @@ serde-wasm-bindgen = "0.6"
 anyhow            = "1"
 hex               = "0.4"
 sha2              = "0.10"
+
+# Pulled in transitively once `crypto-verify` is enabled (arkworks needs a
+# source of randomness even though proof *verification* itself doesn't);
+# wasm32 needs its browser-`crypto` backend explicitly, see
+# ../.cargo/config.toml for the matching `--cfg`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

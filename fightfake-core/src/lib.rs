@@ -1,5 +1,9 @@
 pub mod assertions;
+#[cfg(feature = "crypto-verify")]
+pub mod proof_bundle;
+#[cfg(feature = "native-verify")]
 pub mod schema_utils;
+#[cfg(feature = "native-verify")]
 pub mod verify;
 
 pub use assertions::{
