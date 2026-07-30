@@ -53,11 +53,11 @@ Current repository status:
 
 ## Trusted component options
 
-### Option A (pragmatic first build): process isolation + secure element
+### Option A (initial implementation): process isolation + secure element
 
 - Hashing runs in dedicated daemon process.
 - Device signing key is in ATECC608 (private key non-exportable).
-- Strong demo value, easy to deploy.
+- Straightforward deployment path on current Raspberry Pi setups.
 
 ### Option B (stronger Level 1): TEE TA for hash + signing
 
@@ -67,7 +67,7 @@ Current repository status:
 
 ## Sprint plan
 
-### Sprint 1 (1 week): Capture + macroblock conversion
+### Sprint 1: Capture + macroblock conversion
 
 - CLI capture tool (`capture-pi`) that records 10s YUV clips.
 - Deterministic macroblock tiling unit tests.
@@ -76,7 +76,7 @@ Current repository status:
 
 Deliverable: reproducible macroblock stream + baseline FPS metrics.
 
-### Sprint 2 (1 week): Rolling h1 + device signing
+### Sprint 2: Rolling h1 + device signing
 
 - Integrate Griffin rolling hash backend.
 - Add key provider trait:
@@ -87,7 +87,7 @@ Deliverable: reproducible macroblock stream + baseline FPS metrics.
 
 Deliverable: capture session outputs `h1`, signature, and payload file.
 
-### Sprint 3 (1 week): Level 0 bridge + proof metadata
+### Sprint 3: Level 0 bridge + proof metadata
 
 - Off-device workflow:
   - run edit/prove pipeline,
@@ -98,7 +98,7 @@ Deliverable: capture session outputs `h1`, signature, and payload file.
 
 Deliverable: capture payload + edit-proof payload pair for one sample clip.
 
-### Sprint 4 (1 week): Manifest integration and demo UX
+### Sprint 4: Manifest integration and demo UX
 
 - Integrate `c2pa-rs` embedding.
 - Build one end-to-end public demo asset set for fightfake.ai:

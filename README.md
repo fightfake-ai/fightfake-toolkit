@@ -3,10 +3,6 @@
 A toolkit for proving that a video edit is genuine — and for verifying that claim without
 trusting the editor.  This is the open-source toolkit behind [fightfake.ai](https://fightfake.ai).
 
-**Naming:** *fightfake.ai* is the product; *fightfake-toolkit* is this repository; a
-*fightfake manifest* is a C2PA manifest with `org.zkedit.*` assertions; the CLI binary is
-`fightfake`.
-
 ---
 
 ## The problem
@@ -15,7 +11,7 @@ When someone shares an edited video — a colour-corrected aerial shot, a bright
 security clip, a cropped news footage — there is currently no way to verify that the only
 change made was the declared edit.
 
-**Wait — doesn't C2PA already solve this?**  Partly.  The
+**C2PA covers part of this problem, but not all of it.**  The
 [C2PA standard](https://c2pa.org) (used by Adobe Photoshop, Lightroom, and many cameras
 today) lets a signer *declare* what edits were made and attach a certificate to that
 declaration.  You can open such a file in a C2PA viewer and read: "brightness was adjusted,
@@ -24,8 +20,8 @@ trust that Adobe's signing pipeline was not compromised, that the signer's priva
 not misused, and that the description is accurate.  A deep-fake with a stolen or misleading
 certificate is indistinguishable from a legitimate edit.
 
-**fightfake-toolkit** closes that gap for [fightfake.ai](https://fightfake.ai).  Instead of a declaration backed by institutional
-trust, it produces a **mathematical proof** — a compact blob of bytes that any verifier can
+**fightfake-toolkit** closes that gap.  Instead of a declaration backed by institutional
+trust, it produces a **mathematical proof** (a [zero-knowledge proof](https://en.wikipedia.org/wiki/Zero-knowledge_proof)) — a compact blob of bytes that any verifier can
 check independently, without trusting the signer, without access to the original footage, and
 without any knowledge of who produced the video.  The proof shows that a specific pixel-level
 transformation — whole-frame (brightness, grayscale, invert) or scoped to one region and a
@@ -34,8 +30,10 @@ seconds) — is the *only* difference between the captured original and the publ
 If even a single pixel was changed in any other way, the proof does not verify.
 
 In short:
-- **Standard C2PA:** *"Trust me — I declare this is what was edited."*
-- **fightfake.ai:** *"Don't trust me — verify it yourself. The math guarantees it."*
+- **Standard C2PA** records a signed declaration of what was edited; a verifier trusts the
+  signer and their pipeline.
+- **fightfake-toolkit** adds a zero-knowledge proof of that claim; a verifier checks the math
+  independently of who signed.
 
 ---
 
@@ -59,13 +57,14 @@ manufacturers) for attaching unforgeable provenance records to media files.  Eac
 contains who signed the file, when, and a cryptographic hash of the file's bytes.  If the
 file is altered after signing the hash breaks and any C2PA verifier will flag it.
 
-This toolkit produces C2PA manifests automatically.  Tools like the
-[C2PA browser extension](https://contentauthenticity.org) or the
-[c2pa.org verify page](https://verify.contentauthenticity.org) already know how to read them.
+This toolkit produces C2PA manifests automatically.  Existing tools such as the
+[Digimarc C2PA Content Credentials extension](https://chromewebstore.google.com/detail/c2pa-content-credentials/mjkaocdlpjmphfkjndocehcdhbigaafp)
+and the [Content Credentials verify page](https://verify.contentauthenticity.org) already know
+how to read them.
 
 ### Layer 2 — pixel fingerprints (h1 and h2)
 
-The toolkit computes two hash values over the video pixels:
+fightfake-toolkit computes two hash values over the video pixels:
 
 - **h1** — a hash over the *original* pixels at capture time.
 - **h2** — a hash over the *edited* pixels.
@@ -79,7 +78,7 @@ full hardware integration (Levels 2/3), they are [Griffin](https://eprint.iacr.o
 hash chains computed directly from the camera's pixel bus — a construction designed to be
 efficiently provable inside a zero-knowledge circuit.
 
-### Layer 3 — the zero-knowledge proof (the guarantor)
+### Layer 3 — the zero-knowledge proof
 
 The ZK proof (produced by [Eva](https://github.com/fightfake-ai/eva)) is a single compact
 blob (~200 bytes for BN254/Groth16) that proves, without revealing the original frames:
@@ -87,11 +86,10 @@ blob (~200 bytes for BN254/Groth16) that proves, without revealing the original 
 > "The edited pixels are the result of applying the declared edit gadget to the original
 > pixels identified by h1, producing h2. No other change was made."
 
-This is precisely what standard C2PA cannot provide: not a declaration of what happened, but
-an unforgeable mathematical certificate that *only* the declared edit occurred.  A verifier
-checks the proof in milliseconds.  The math underlying it (Nova IVC + Groth16) ensures that
-generating a convincing false proof is computationally infeasible — even for the person who
-signed the video.
+Standard C2PA can declare that claim; it cannot prove it.  The ZK layer supplies an
+unforgeable mathematical certificate that *only* the declared edit occurred.  A verifier
+checks the proof in milliseconds.  Under Nova IVC + Groth16, generating a convincing false
+proof is computationally infeasible — including for the person who signed the video.
 
 The proof embeds in the C2PA manifest as a custom assertion (`org.zkedit.edit_proof.v1`),
 so existing C2PA tools can carry it without modification, and fightfake-aware tools can
@@ -122,16 +120,12 @@ C2PA manifests must be signed.  For testing, generate a self-signed certificate:
 #         testdata/certs/signer-key.pem   (private key  — keep secret)
 ```
 
-#### What is a certificate and why does C2PA need one?
+#### Certificates and C2PA signatures
 
-A digital certificate is a signed statement:
-
-> *"I, a trusted authority, confirm that this public key belongs to this entity."*
-
-More concretely: a certificate is a small file that bundles together a **public key** and an
-**identity** (name, organisation, …), with a signature from a Certificate Authority (CA)
-confirming they belong together.  The corresponding **private key** is kept secret and is
-used to produce signatures.
+A digital certificate is a small file that bundles a **public key** with an **identity**
+(name, organisation, …), signed by a Certificate Authority (CA) confirming they belong
+together.  The corresponding **private key** is kept secret and is used to produce
+signatures.
 
 C2PA requires every manifest to carry a **COSE_Sign1** signature — a compact binary
 envelope (defined in [RFC 9052](https://www.rfc-editor.org/rfc/rfc9052), which superseded
@@ -203,20 +197,19 @@ out/edited.signed.mp4     ← the EDITED  video + C2PA manifest (h2 + proof refe
 out/proof.bin             ← ZK proof (or 32-byte stub in stub build)
 ```
 
-**Why two signed MP4 files?**
+**Two signed MP4 files.** The ZK proof is **self-contained in the edit manifest**.  A public
+verifier needs only `edited.signed.mp4` (which contains h1, h2, the gadget id, and an
+embedded copy of the capture manifest) plus `proof.bin`.  **The original video never needs
+to be published.**
 
-The ZK proof is **self-contained in the edit manifest**.  A public verifier needs only
-`edited.signed.mp4` (which contains h1, h2, the gadget id, and an embedded copy of the
-capture manifest) plus `proof.bin`.  **The original video never needs to be published.**
+h1 is a hash — it reveals nothing about the original content.  A verifier learns that
+whatever the original was, applying the declared gadget produces exactly this edited video,
+and nothing else was changed.  That is the zero-knowledge property.
 
-h1 is a hash — it reveals nothing about the original content.  A verifier learns: *whatever
-the original was, applying the declared gadget produces exactly this edited video, and
-nothing else was changed.*  This is the zero-knowledge property.
-
-**Concrete example — drone footage:**  a drone records criminal activity; the owner blurs
-faces with `prove-edit`; they publish only `edited.signed.mp4` + `proof.bin`; they keep
-`capture.signed.mp4` private.  Any verifier confirms the blur is the only change.  If ever
-subpoenaed, the owner can show the original to a court, which can verify h1 matches it.
+**Example — drone footage.** A drone records sensitive activity; the owner blurs faces with
+`prove-edit` and publishes only `edited.signed.mp4` + `proof.bin`, keeping
+`capture.signed.mp4` private.  Any verifier can confirm the blur is the only change.  If the
+original is later disclosed (e.g. under subpoena), a court can check that h1 matches it.
 
 `capture.signed.mp4` is therefore a **private evidence artefact**, not something that needs
 to be published alongside the proof.  Its manifest is embedded inside `edited.signed.mp4`
@@ -225,7 +218,7 @@ so the C2PA signature chain validates without the original file.
 For Level 2+ hardware cameras, the capture manifest is where the hardware attestation
 (device certificate chain, TEE signature over h1) will live, making h1 itself
 hardware-rooted rather than software-computed.  In Level 0, h1 is software-computed
-scaffolding — see [_Capture levels_](#capture-levels--how-trustworthy-is-h1).
+scaffolding — see [_Capture levels_](#capture-levels--trustworthiness-of-h1).
 
 `c2pa-sign` produces a completely different, simpler thing: a single signed file with only a
 `c2pa.actions` declaration and a BMFF hash.  It is not one of the two fightfake files.
@@ -235,13 +228,13 @@ width and height must be exact multiples of 16.  The toolkit enforces this and e
 a clear error and an ffmpeg command if your video does not meet the requirement.  Many
 common resolutions already satisfy it (e.g. 1920×1072, 1280×720, 1280×960); many others
 do not (e.g. 1920×1080 — 1080 ÷ 16 = 67.5).  See
-[_16-pixel alignment_](#16-pixel-alignment--why-and-future-options) below for the
+[_16-pixel alignment_](#16-pixel-alignment--requirement-and-future-options) below for the
 reasoning and future options.
 
-**Why macroblocks?**  Eva's IVC circuit processes video one 16×16 pixel block at a time.
-Each IVC step proves that the edit gadget was applied correctly to one (or more) macroblocks
-and that the hash chain (h1 or h2) advanced correctly.  This makes the proof incremental:
-a 1-second clip and a 10-minute clip use the same per-step circuit, just with more steps.
+**Macroblocks.** Eva's IVC circuit processes video one 16×16 pixel block at a time.  Each
+IVC step proves that the edit gadget was applied correctly to one (or more) macroblocks and
+that the hash chain (h1 or h2) advanced correctly.  The proof is therefore incremental: a
+1-second clip and a 10-minute clip use the same per-step circuit, just with more steps.
 
 **Stub build vs. full build:** by default (no `--features eva-backend`) the proof is a
 32-byte zero placeholder — call this the *stub build*.  The edit, hashes, and C2PA manifests
@@ -249,7 +242,7 @@ are real and fully usable for integration testing.  Build with `--features eva-b
 a real Nova IVC + Groth16 proof — the *full build*.
 
 This is different from the **capture levels** (Level 0–3) described in the
-[trust model section](#capture-levels--how-trustworthy-is-h1).  The levels are about how
+[trust model section](#capture-levels--trustworthiness-of-h1).  The levels are about how
 much you trust h1 (the original pixel fingerprint): Level 0 means a software app computed
 h1 from an existing recording; Level 3 means silicon-level hardware produced it.  The ZK
 proof is cryptographically sound regardless of the level — the level only tells you how hard
@@ -416,13 +409,12 @@ The recorded `gadget_params` reflect this — instead of a single `x`/`y`/`w`/`h
 > Blacked out a moving pixel region (tracked across 3 keyframe(s)), frames 52–64 only (fill
 > value 0). All other pixels and frames are unchanged.
 
-**What this buys you over `brightness`/`grayscale`/`invert` on the whole clip:** h1/h2 still
-cover the *entire* video (nothing about the overall pipeline changes), but the declared edit —
-and, once wired to the real prover, the ZK proof — is scoped to exactly the pixels and frames
-that actually changed. A verifier (or a human reading the manifest) sees precisely what
-changed and can independently confirm that the other ~99% of the video's pixels are provably
-identical to the original, instead of having to trust a blanket "brightness was applied"
-claim across the whole clip.
+**Scoped edit vs whole-clip gadgets.** h1/h2 still cover the *entire* video (the overall
+pipeline is unchanged), but the declared edit — and, once wired to the real prover, the ZK
+proof — is scoped to exactly the pixels and frames that changed.  A verifier (or a human
+reading the manifest) sees precisely what changed and can confirm that the remaining pixels
+are unchanged relative to the original, instead of relying on a blanket whole-clip claim
+such as "brightness was applied".
 
 The exact rectangle and frame range are recorded in the `org.zkedit.edit_proof` assertion's
 `gadget_params` field and rendered into the standard `c2pa.actions` description, e.g.:
@@ -698,67 +690,39 @@ try {
 
 What the browser checks with the default build: h1 consistency between the two assertions and
 SHA-256 of the proof binary. With `--features crypto-verify`, `verifyGroth16Proof` additionally
-runs the real Groth16/Nova-decider pairing check — see "What WASM verification checks" below
+runs the real Groth16/Nova-decider pairing check — see "WASM verification checks" below
 and `fightfake_core::proof_bundle`'s doc comment for why this is a from-scratch reimplementation
 of a small slice of Eva's decider math rather than a direct dependency on Eva's own prover crate
 (that crate hard-requires native threads and cannot target `wasm32-unknown-unknown` at all).
 
 ---
 
-## Verification trust model — can a website fake the green button?
+## Verification trust model
 
-This is an important question.  A website showing a "✅ proof verified" badge can always
-lie — if the verification runs on the website's own server, or via JavaScript served by the
-same website, the site operator can return "valid" without checking anything.  The ZK proof
-is a mathematical object that cannot be forged, but **showing that the proof is valid
-requires running a verification algorithm, and that algorithm can be faked**.
+For third-party media pages, the browser extension model is the secure default.
+Any verification path controlled by the same page operator can be replaced with
+"always valid" logic. A secure verifier must be distributed independently of the
+publisher's page code.
 
-The trust hierarchy for verification, from weakest to strongest:
-
-### Level A — server-side verification (weakest)
-
-The website sends the proof to its own backend, which checks it and returns a result.
-Trust: you trust the website operator completely.  fightfake.ai saying "valid" is no
-different from fightfake.ai saying "I assert this is genuine" — you have no way to
-distinguish honest verification from a hardcoded response.
-
-### Level B — JavaScript served by the same website
-
-The website serves a JS bundle that runs the verifier in your browser.  This is better in
-one sense (the computation happens in your browser, not their server), but the same operator
-controls both the proof and the JS.  A compromised or dishonest fightfake.ai can serve JS
-that always returns `true`.
-
-### Level C — fightfake.ai/verify page (convenient, reasonable trust)
-
-A user who encounters a proof on proofdrop.ai can download the proof bundle
-(`edited.signed.mp4` + `proof.bin`) and upload it to **fightfake.ai/verify**.  The
-verification WASM runs inside the user's own browser — not on fightfake.ai's server.
-fightfake.ai sees nothing but the page load; the actual cryptographic check is local.
-
-The trust model here: the user is choosing to trust fightfake.ai by navigating to their
-page, the same way you trust any web service.  This is reasonable for most non-technical
-users who care about verification but won't install a CLI.
-
-### Level D — browser extension (seamless, automatic, independent of page operator)
+### Browser extension (primary security model)
 
 A browser extension is installed once from the Chrome or Firefox extension store.  After
 that it runs automatically on every page the user visits — no extra steps.
 
-Consider proofdrop.ai: a journalist publishes an article with a signed video.  A user with
-the fightfake.ai extension installed just visits the page normally.  The extension
-automatically detects the C2PA manifest embedded in the video, fetches `proof.bin`,
-runs Groth16 verification using its own bundled code (installed by the user, not served
-by proofdrop.ai), and shows a badge in the video or toolbar.  proofdrop.ai cannot interfere
-with this — the extension code comes from the extension store, not from the page.
+Example: on proofdrop.ai a journalist publishes an article with a signed video.  A user with
+the fightfake extension installed visits the page normally.  The extension automatically
+detects the C2PA manifest embedded in the video, fetches `proof.bin`, runs Groth16
+verification using its own bundled code (installed by the user, not served by proofdrop.ai),
+and shows a badge in the video or toolbar.  proofdrop.ai cannot interfere with this — the
+extension code comes from the extension store, not from the page.
 
-This is exactly how the existing [C2PA browser extension](https://contentauthenticity.org/get-started)
-from the Content Authenticity Initiative already works for standard C2PA.  A fightfake.ai
-extension would extend it with ZK proof verification.
+This matches how existing C2PA browser extensions work for standard C2PA — for example the
+[Digimarc C2PA Content Credentials extension](https://chromewebstore.google.com/detail/c2pa-content-credentials/mjkaocdlpjmphfkjndocehcdhbigaafp)
+([source](https://github.com/digimarc-corp/c2pa-content-credentials-extension)).
+A fightfake extension extends that model with ZK proof verification.
 
-Trust model: you trust fightfake.ai's extension code, which you installed from the extension
-store.  The extension store (Google/Mozilla) applies its own review and code-signing, so the
-trust chain is: Google/Mozilla → fightfake.ai → the code running in your browser.
+Trust model: users trust the extension package they installed; publishers do not control that
+code path.
 
 #### How the browser extension shows a badge on the video
 
@@ -800,7 +764,7 @@ The badge is ordinary HTML/CSS added to the page DOM, positioned with `position:
 relative to the video's bounding box.  It is not inside the player's native controls — it
 floats on top, like a subtitle overlay.
 
-**What works well:**
+**Capabilities and limits of the extension model:**
 
 | Scenario | Extension can verify and badge? |
 |---|---|
@@ -808,19 +772,13 @@ floats on top, like a subtitle overlay.
 | Video linked via a same-origin `proof.bin` URL | ✅ Yes |
 | Any page after one-time install | ✅ Automatic — user just browses normally |
 
-**What is harder or impossible:**
-
-| Scenario | Problem |
+| Scenario | Limitation |
 |---|---|
 | YouTube / Vimeo embed | Video runs in a third-party iframe; file bytes usually not accessible |
 | Cross-origin iframe without permission | Extension may not be able to read the video element |
 | User has not installed the extension | No badge — any on-page badge is only as trustworthy as the site |
 
-Until a fightfake.ai extension ships, users rely on Level C (verify page) or Level E (CLI).
-The existing C2PA extension already demonstrates the overlay pattern for standard C2PA
-signatures and hard bindings.
-
-### Level E — CLI verification (strongest, for technical users)
+### CLI verification (developer and testing path)
 
 Download the `fightfake` binary (or compile it from this repository) and run:
 
@@ -831,38 +789,23 @@ Download the `fightfake` binary (or compile it from this repository) and run:
   --proof   proof.bin
 ```
 
-This is fully independent of fightfake.ai.  The verification algorithm is open source, can
-be audited, and compiled on any machine.  No network request is made.  This is the gold
-standard for anyone who wants to verify a proof without trusting the website at all.
+CLI verification is fully independent of any website and is useful for integration tests,
+benchmarking, and reproducible local verification.
 
 ### Summary
 
-| Level | Verification method | Who controls the verifier | Extra steps for user | Trust in page operator |
-|---|---|---|---|---|
-| A | Server-side badge on the page | Page operator's server | None | Full |
-| B | JS/WASM served by the page | Page operator | None | Full |
-| C | fightfake.ai/verify page (WASM in browser) | fightfake.ai | Download + upload proof | Trust fightfake.ai |
-| D | fightfake.ai browser extension | Extension store + fightfake.ai | Install extension once | None |
-| E | CLI compiled from source | User | Download / build CLI | None |
+- **Primary secure user path:** browser extension, because verifier code is not controlled by
+  the media publisher.
+- **Technical/testing path:** local CLI verification, for scripted and reproducible checks in
+  development and CI environments.
 
-**The page's green button is a convenience, not a security primitive.**  Any page can fake
-it.  The security primitive is the proof file and the open-source verifier running under
-the user's control.
-
-**For most non-technical users:** the browser extension (Level D) is the practical answer —
-install once from the extension store, then just browse normally.  No extra steps on any
-individual page.  The fightfake.ai/verify page (Level C) requires manually downloading and
-uploading proof files, which is more friction than installing an extension.
-
-**For full independence from fightfake.ai:** compile and run the CLI (Level E).
-
-**What WASM verification checks:**
+**WASM verification checks:**
 1. C2PA signature on both manifests is structurally valid (`verifyAssertionLinkage`).
 2. h1 in the capture assertion matches h1 in the edit-proof assertion (`verifyAssertionLinkage`).
 3. SHA-256 of `proof.bin` matches `proof_sha256` in the edit-proof assertion (`verifyAssertionLinkage`).
 4. **With `--features crypto-verify`:** the actual Groth16 pairing equations over BN254 —
    the cryptographic heart of the ZK proof (`verifyGroth16Proof`). This is what makes browser
-   verification trustless rather than just consistent-looking: a stub proof (32 bytes of
+   verification trustless rather than merely consistent-looking: a stub proof (32 bytes of
    zeros) is rejected outright, and a tampered-but-well-formed proof fails the pairing check
    rather than silently passing.
 
@@ -932,7 +875,7 @@ proves forward integrity from signing onward, not that the declared edit is the 
 from a specific original.  See [`docs/manifest-comparison.md`](docs/manifest-comparison.md)
 for the full sequence diagram.
 
-### What's inside each manifest
+### Manifest contents
 
 | Assertion | Standard C2PA (`c2pa-sign`) | fightfake C2PA (`prove-edit`) |
 |---|---|---|
@@ -943,7 +886,7 @@ for the full sequence diagram.
 | `org.zkedit.edit_proof.v1` (h2 + proof ref) | — | ✅ edited pixel hash + proof |
 | `proof.bin` (ZK proof blob) | — | ✅ (stub in Level 0; real in Level 1) |
 
-### What each approach can (and cannot) prove
+### What each approach can prove
 
 | Claim | Standard C2PA | fightfake C2PA |
 |---|---|---|
@@ -955,16 +898,15 @@ for the full sequence diagram.
 | "Verifiable without access to the original footage" | ❌ | ✅ |
 | "Verifiable without trusting the signer" | ❌ | ✅ |
 
-**The core distinction:**
-Standard C2PA shifts the trust question to certificates: you verify the signer's certificate
-chains to a trusted CA, then accept the signer's declaration.  If the signer's key is
-compromised, or if the pipeline that produces the declaration is manipulated, you have no way
-to detect it.
+**The core distinction.** Standard C2PA shifts the trust question to certificates: you verify
+the signer's certificate chains to a trusted CA, then accept the signer's declaration.  If the
+signer's key is compromised, or if the pipeline that produces the declaration is manipulated,
+there is no independent check that the declared edit is the only change.
 
-fightfake.ai eliminates that trust dependency.  The ZK proof is a mathematical object: if it
-verifies, the declared edit is the only pixel-level change, period — regardless of who
-signed the file, whether their certificate is trusted, or whether their infrastructure was
-compromised.
+fightfake-toolkit removes that dependency on the signer's honesty.  The ZK proof is a
+mathematical object: if it verifies, the declared edit is the only pixel-level change —
+regardless of who signed the file, whether their certificate is trusted, or whether their
+infrastructure was compromised.
 
 Both manifests are readable by the same C2PA tools (browser extension, online validator).
 Standard C2PA viewers will display the fightfake manifest correctly, showing the `c2pa.actions`
@@ -974,8 +916,7 @@ assertion and noting the `org.zkedit.*` assertions as custom extensions.
 
 ## How c2pa-rs signs the video
 
-Understanding this matters for evaluating performance claims and for comparing with the
-approach in academic papers such as
+This section is useful when comparing performance claims with academic approaches such as
 [VerITAS (eprint.iacr.org/2024/1066)](https://eprint.iacr.org/2024/1066.pdf).
 
 ### Where the manifest lives — BMFF box structure
@@ -1015,7 +956,7 @@ transformations were applied before signing.  In a typical editor workflow, thos
 already the **post-edit** file: the edit happens first, then c2pa-rs hashes the result and
 attaches the manifest.
 
-### Why this is fast — and what VerITAS is actually about
+### Why C2PA signing is fast (and what VerITAS addresses)
 
 The [VerITAS paper](https://eprint.iacr.org/2024/1066.pdf) observes that hashing raw pixel
 data *inside a zero-knowledge circuit* is extremely expensive.  The root cause is that SHA-256
@@ -1042,11 +983,11 @@ arithmetic circuits:
 - SHA-256 in a circuit costs ~30 000 constraints per 64-byte block
 - Poseidon (another ZK-friendly hash) costs ~220 constraints per permutation — similar to Griffin
 
-**Is proving Griffin faster than proving SHA-256?  Yes — dramatically.**  For a 374 MB
-raw YUV input (121 frames at 1920×1072), the constraint count with Griffin is roughly
-**100–500× lower** than with SHA-256.  Griffin is slower than SHA-256 as a plain hash on
-real hardware (no SIMD acceleration), but the ZK proving cost — which is what dominates
-total run time — is orders of magnitude lower, making the proof feasible in minutes
+**Griffin vs SHA-256 in-circuit.** Proving Griffin is dramatically cheaper than proving
+SHA-256.  For a 374 MB raw YUV input (121 frames at 1920×1072), the constraint count with
+Griffin is roughly **100–500× lower** than with SHA-256.  Griffin is slower than SHA-256 as
+a plain hash on real hardware (no SIMD acceleration), but the ZK proving cost — which
+dominates total run time — is orders of magnitude lower, making the proof feasible in minutes
 rather than days.
 
 | Hash | Where computed | Approx. constraints / block | Purpose |
@@ -1218,7 +1159,7 @@ C2PA and fightfake manifests side-by-side (see the
 
 ---
 
-## Capture levels — how trustworthy is h1?
+## Capture levels — trustworthiness of h1
 
 The proof itself (Nova IVC + Groth16) is cryptographically sound at any level.  What varies
 is how much you trust the *input* to the proof: the h1 fingerprint of the original video.
@@ -1324,7 +1265,7 @@ fightfake-toolkit/
 
 ---
 
-## 16-pixel alignment — why and future options
+## 16-pixel alignment — requirement and future options
 
 Eva's IVC circuit operates on 16×16 pixel macroblocks.  Both the width and height of the
 input video must be exact multiples of 16, or the tiling step cannot partition the frame
@@ -1347,9 +1288,8 @@ ffmpeg -i input.mp4 -vf crop=1920:1072:0:0 -c:v libx264 -crf 18 input-cropped.mp
 ./target/release/fightfake prove-edit --input input-cropped.mp4 --out-dir out/
 ```
 
-**Open question: how should a production system handle non-aligned captures?**
-
-This is a genuine unsolved design question.  The options are:
+**Production options for non-aligned captures.** The current toolkit leaves alignment to the
+caller.  Longer-term options include:
 
 1. **Require aligned capture.**  Configure the camera to output a natively aligned
    resolution (e.g. 1920×1072 instead of 1920×1080).  Many cameras allow this.  h1 covers

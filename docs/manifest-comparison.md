@@ -5,10 +5,6 @@ stores it, and shows annotated, side-by-side examples of a **standard C2PA
 manifest** (produced by `c2pa-sign`) and the two **fightfake manifests**
 (produced by `prove-edit`).
 
-**Naming:** *fightfake.ai* is the product; *fightfake-toolkit* is the repository;
-a *fightfake manifest* is a C2PA manifest with `org.zkedit.*` assertions; the
-CLI binary is `fightfake`.
-
 The example JSON files in this directory were generated from
 `bank-robbery-original.mp4` (1920×1072 after auto-crop, 121 frames, 5 s clip)
 and can be regenerated at any time:
@@ -106,7 +102,7 @@ The manifest has **no reference to the original file**.  It records only:
 So standard C2PA proves **forward integrity** from the moment of signing ("this
 file has not been tampered with since I signed it"), not **backward provenance**
 ("this file came from that specific original, and only the declared edit was
-applied").  That backward link is what fightfake.ai adds via h1, h2, ingredients,
+applied").  That backward link is what fightfake adds via h1, h2, ingredients,
 and the ZK proof.
 
 ---
