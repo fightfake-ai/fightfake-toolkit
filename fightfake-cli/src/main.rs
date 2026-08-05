@@ -2,6 +2,7 @@ mod c2pa_signer;
 mod cert_gen;
 mod demo;
 mod ffmpeg;
+mod image_ingest;
 mod pi_capture;
 mod workflow;
 
@@ -21,6 +22,7 @@ use demo::{run_level0_demo, Level0DemoConfig};
 use fightfake_core::verify::{verify_bundle, verify_capture_asset, verify_signed_assets};
 use pi_capture::LibcameraContract;
 use workflow::{run_prove_edit, Gadget, ProveEditConfig, RectKeyframe, RedactRectSpec};
+use image_ingest::is_still_image;
 
 // ── CLI structure ─────────────────────────────────────────────────────────────
 
@@ -39,11 +41,14 @@ struct Cli {
 enum Command {
     /// Full workflow: decode → edit → prove → C2PA sign → verify.
     ///
-    /// Requires ffmpeg on PATH.  With default features the proof is a Level-0
-    /// stub (32 zero bytes).  Build with `--features eva-backend` to generate
-    /// a real Nova IVC + Groth16 proof.
+    /// Accepts a video (MP4 / anything ffmpeg can decode) **or** a still image
+    /// (PNG, JPEG, WebP, …). Stills are one frame; dimensions are cropped to
+    /// multiples of 16 when needed. Requires ffmpeg on PATH for video decode
+    /// and for re-encoding the edited output. With default features the proof
+    /// is a Level-0 stub (32 zero bytes). Build with `--features eva-backend`
+    /// to generate a real Nova IVC + Groth16 proof.
     ProveEdit {
-        /// Input video (MP4 or any container ffmpeg can decode).
+        /// Input video or still image (PNG/JPEG/WebP/…).
         #[arg(long, short)]
         input: PathBuf,
 
@@ -407,10 +412,15 @@ fn main() -> Result<()> {
                 GadgetArg::Grayscale  => Gadget::Grayscale,
                 GadgetArg::Invert     => Gadget::Invert,
                 GadgetArg::Redact     => {
+                    let mut redact_frame_end = redact_frame_end;
+                    if redact_frame_end == 0 && is_still_image(&input) {
+                        // Single-frame still: redact the whole image by default.
+                        redact_frame_end = 1;
+                    }
                     if redact_frame_end == 0 {
                         anyhow::bail!(
                             "--gadget redact requires --redact-frame-end (exclusive) \
-                             to be set (> 0)"
+                             to be set (> 0); for still images it defaults to 1"
                         );
                     }
                     if redact_frame_start >= redact_frame_end {

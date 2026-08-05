@@ -1029,9 +1029,9 @@ Key differences visible in the diff:
 ### `prove-edit` — full fightfake workflow
 
 ```
-fightfake prove-edit --input <VIDEO> [OPTIONS]
+fightfake prove-edit --input <VIDEO|IMAGE> [OPTIONS]
 
-  --input, -i <FILE>       Input video (path relative to cwd, or absolute)
+  --input, -i <FILE>       Input video (ffmpeg) or still image (PNG/JPEG/WebP/…)
   --gadget <NAME>          Edit to apply: brightness | grayscale | invert | redact  [default: brightness]
   --gadget-param <N>       brightness: luma scale in units of 1/1024 (default 416 ≈ 0.41×)
   --redact-x <N>           redact: top-left X pixel of the rectangle  [default: 0]
@@ -1041,16 +1041,21 @@ fightfake prove-edit --input <VIDEO> [OPTIONS]
   --redact-track <FILE>    redact: JSON keyframe list for a moving box — overrides
                            --redact-x/-y/-width/-height, see "Moving redact rectangle"
   --redact-frame-start <N> redact: first frame, inclusive, 0-based  [default: 0]
-  --redact-frame-end <N>   redact: last frame, exclusive  [default: 0 — must be set]
+  --redact-frame-end <N>   redact: last frame, exclusive  [default: 0 — required for video;
+                           stills default to 1]
   --redact-fill <N>        redact: luma fill value, 0-255 (0 = black)  [default: 0]
   --out-dir, -o <DIR>      Output directory for all artefacts  [default: out]
   --cert <FILE>            PEM signer certificate  [default: testdata/certs/signer-cert.pem]
   --key  <FILE>            PEM signer private key   [default: testdata/certs/signer-key.pem]
   --device-id <ID>         Identifier embedded in the capture assertion  [default: dev-0]
-  --blocks-per-step <N>    Macroblocks per Nova IVC step (Level 1 only)  [default: 256]
+  --blocks-per-step <N>    Macroblocks per Nova IVC step (Level 1 only)  [default: 256;
+                           auto-adjusted for stills when it does not divide MB count]
   --touched-window         redact only: scope the real proof to [redact-frame-start, redact-frame-end);
                            pre/post are hash-anchored instead — see "Proving only the touched time window"
 ```
+
+Still images are decoded in-process (no ffmpeg for ingest), treated as one frame, and cropped
+to multiples of 16 when needed. Output is a 1-frame `edited.mp4` plus C2PA / `proof.bin`.
 
 Without `--features eva-backend` (Level 0), the proof is a 32-byte placeholder.  The edit,
 hashes, and C2PA manifests are real and can be used for integration testing.
@@ -1059,8 +1064,11 @@ With `--features eva-backend` (Level 1), a full Nova IVC + Groth16 proof is gene
 Expect ~5 min for a 10-second 352×288 clip on an M1 Mac; longer for higher resolutions.
 
 ```bash
-# Level 0 — fast, for integration testing
+# Level 0 — still image
 cargo build -p fightfake-cli --release
+./target/release/fightfake prove-edit --input testdata/images/toy64.png --out-dir out-photo/
+
+# Level 0 — video
 ./target/release/fightfake prove-edit --input testdata/videos/input/clip.mp4
 
 # Level 1 — real ZK proof (first build takes 10–20 min)

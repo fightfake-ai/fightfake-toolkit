@@ -3,19 +3,19 @@
 //! # Pipeline
 //!
 //! ```text
-//! Input MP4
-//!   │ ffmpeg decode
-//!   ▼
+//! Input MP4  —or—  still image (PNG/JPEG/…)
+//!   │ ffmpeg decode            │ image crate → YUV 4:2:0 (1 frame)
+//!   ▼                          ▼
 //! Raw YUV 4:2:0 frames
 //!   │ yuv420_to_macroblocks  (Eva)
 //!   ▼
 //! Eva macroblocks (orig_*_enc)
-//!   ├──► Griffin hash chain ──► h1
+//!   ├──► hash ──► h1
 //!   │
 //!   │ apply edit gadget (brightness / grayscale / invert / redact)
 //!   ▼
 //! Edited macroblocks
-//!   ├──► Griffin hash chain ──► h2
+//!   ├──► hash ──► h2
 //!   │
 //!   │ [eva-backend] Nova IVC + Groth16 ──► proof.bin
 //!   │
@@ -23,6 +23,9 @@
 //!   ▼
 //! Edited MP4  +  capture.signed.mp4  +  edited.signed.mp4
 //! ```
+//!
+//! Still images are treated as a single frame (`num_frames = 1`, fps `1/1`).
+//! Dimensions are cropped to multiples of 16 (top-left) when needed.
 //!
 //! # Proof modes
 //!
@@ -46,6 +49,7 @@ use sha2::{Digest, Sha256};
 
 use crate::c2pa_signer::{sign_capture_asset, sign_edit_asset, SignMaterial};
 use crate::ffmpeg::{ffmpeg_decode_to_yuv, ffmpeg_encode_from_yuv, probe_video};
+use crate::image_ingest::{decode_still_to_yuv420, is_still_image};
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -257,33 +261,69 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
     let out = |name: &str| cfg.out_dir.join(name);
     let wall = std::time::Instant::now();
 
-    // 1. Probe video dimensions.
-    let (orig_w, orig_h, fps_num, fps_den, num_frames) = probe_video(&cfg.input)?;
-    println!(
-        "[workflow] input: {orig_w}×{orig_h} @ {fps_num}/{fps_den} fps, {num_frames} frames"
-    );
+    let still = is_still_image(&cfg.input);
 
-    // Eva's IVC circuit works on 16×16 macroblocks — both dimensions must be
-    // multiples of 16.  We require the caller to pre-crop rather than doing it
-    // silently, because h1 must cover exactly the pixels in the supplied file
-    // and any implicit crop would make that relationship opaque.
-    let width  = orig_w;
-    let height = orig_h;
-    if orig_w % 16 != 0 || orig_h % 16 != 0 {
-        let cw = (orig_w / 16) * 16;
-        let ch = (orig_h / 16) * 16;
-        anyhow::bail!(
-            "video dimensions {orig_w}×{orig_h} are not multiples of 16.\n\
-             Eva's ZK circuit requires both width and height to be exact multiples of 16.\n\
-             Pre-crop with ffmpeg before running prove-edit:\n\n\
-             \x20 ffmpeg -i {:?} -vf crop={cw}:{ch}:0:0 -c:v libx264 -crf 18 cropped.mp4\n\n\
-             Then pass cropped.mp4 to prove-edit.",
-            cfg.input
+    // 1. Probe / decode dimensions.
+    let (orig_w, orig_h, fps_num, fps_den, num_frames, yuv_bytes, decode_s) = if still {
+        let t = std::time::Instant::now();
+        let (yuv, w, h) = decode_still_to_yuv420(&cfg.input)?;
+        let decode_s = t.elapsed().as_secs_f64();
+        let raw_yuv_path = out("raw_orig.yuv");
+        std::fs::write(&raw_yuv_path, &yuv)
+            .with_context(|| format!("failed to write {}", raw_yuv_path.display()))?;
+        println!(
+            "[workflow] still image: {w}×{h}, 1 frame (decoded in-process, {decode_s:.2}s)"
         );
-    }
-    let crop_info = {
-        None
+        println!("[workflow] decoded → {} ({decode_s:.2}s)", raw_yuv_path.display());
+        (w, h, 1u64, 1u64, 1usize, yuv, decode_s)
+    } else {
+        let (orig_w, orig_h, fps_num, fps_den, num_frames) = probe_video(&cfg.input)?;
+        println!(
+            "[workflow] input: {orig_w}×{orig_h} @ {fps_num}/{fps_den} fps, {num_frames} frames"
+        );
+        if orig_w % 16 != 0 || orig_h % 16 != 0 {
+            let cw = (orig_w / 16) * 16;
+            let ch = (orig_h / 16) * 16;
+            anyhow::bail!(
+                "video dimensions {orig_w}×{orig_h} are not multiples of 16.\n\
+                 Eva's ZK circuit requires both width and height to be exact multiples of 16.\n\
+                 Pre-crop with ffmpeg before running prove-edit:\n\n\
+                 \x20 ffmpeg -i {:?} -vf crop={cw}:{ch}:0:0 -c:v libx264 -crf 18 cropped.mp4\n\n\
+                 Then pass cropped.mp4 to prove-edit.",
+                cfg.input
+            );
+        }
+        let raw_yuv_path = out("raw_orig.yuv");
+        let t = std::time::Instant::now();
+        ffmpeg_decode_to_yuv(&cfg.input, &raw_yuv_path, orig_w, orig_h)?;
+        let decode_s = t.elapsed().as_secs_f64();
+        println!("[workflow] decoded → {} ({decode_s:.2}s)", raw_yuv_path.display());
+        let yuv_bytes = std::fs::read(&raw_yuv_path).context("failed to read decoded YUV")?;
+        (orig_w, orig_h, fps_num, fps_den, num_frames, yuv_bytes, decode_s)
     };
+
+    let width = orig_w;
+    let height = orig_h;
+    let crop_info = { None };
+
+    // Still images are small; default --blocks-per-step 256 often does not divide
+    // the macroblock count (e.g. 64×64 → 16 MBs). Auto-adjust unless the caller
+    // already picked a divisor.
+    let mut blocks_per_step = cfg.blocks_per_step;
+    let mbs_per_frame = (width / 16) * (height / 16);
+    let total_mbs = mbs_per_frame * num_frames;
+    if total_mbs > 0 && blocks_per_step > 0 && total_mbs % blocks_per_step != 0 {
+        let suggested = if mbs_per_frame > 0 && total_mbs % mbs_per_frame == 0 {
+            mbs_per_frame
+        } else {
+            total_mbs
+        };
+        println!(
+            "[workflow] adjusting --blocks-per-step {blocks_per_step} → {suggested} \
+             ({total_mbs} macroblocks total, {mbs_per_frame}/frame)"
+        );
+        blocks_per_step = suggested;
+    }
 
     // "Touched time window": only meaningful for `redact`, since every other
     // gadget edits every pixel of every frame anyway. Resolved once, up
@@ -309,14 +349,6 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
     } else {
         None
     };
-
-    // 2. Decode to raw planar YUV 4:2:0.
-    let raw_yuv_path = out("raw_orig.yuv");
-    let t = std::time::Instant::now();
-    ffmpeg_decode_to_yuv(&cfg.input, &raw_yuv_path, width, height)?;
-    let decode_s = t.elapsed().as_secs_f64();
-    println!("[workflow] decoded → {} ({decode_s:.2}s)", raw_yuv_path.display());
-    let yuv_bytes = std::fs::read(&raw_yuv_path).context("failed to read decoded YUV")?;
 
     // 3. Split into Y / U / V planes or tile into Eva macroblocks.
     let t = std::time::Instant::now();
@@ -359,7 +391,7 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
         height,
         num_frames,
         &cfg.gadget,
-        cfg.blocks_per_step,
+        blocks_per_step,
         touched_window,
     )?;
     let prove_s = t.elapsed().as_secs_f64();
@@ -377,7 +409,7 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
         );
     }
 
-    // 6. Re-encode edited video.
+    // 6. Re-encode edited video (and, for stills, a 1-frame capture MP4 for C2PA).
     let edited_yuv_path = out("raw_edited.yuv");
     let edited_yuv = assemble_yuv(&edited_y, &edited_u, &edited_v, width, height, num_frames)?;
     std::fs::write(&edited_yuv_path, &edited_yuv).context("failed to write edited YUV")?;
@@ -387,6 +419,18 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
     ffmpeg_encode_from_yuv(&edited_yuv_path, &edited_mp4, width, height, fps_num, fps_den)?;
     let encode_s = t.elapsed().as_secs_f64();
     println!("[workflow] edited video → {} ({encode_s:.2}s)", edited_mp4.display());
+
+    // Capture asset for C2PA: videos use the input file; stills are re-wrapped as
+    // a 1-frame MP4 so source/destination formats match for the C2PA signer.
+    let capture_source = if still {
+        let capture_mp4 = out("capture.mp4");
+        let raw_yuv_path = out("raw_orig.yuv");
+        ffmpeg_encode_from_yuv(&raw_yuv_path, &capture_mp4, width, height, fps_num, fps_den)?;
+        println!("[workflow] capture video (from still) → {}", capture_mp4.display());
+        capture_mp4
+    } else {
+        cfg.input.clone()
+    };
 
     // 7. Emit C2PA assertion JSONs.
     let proof_sha256 = hex::encode(Sha256::digest(&proof_bytes));
@@ -429,7 +473,13 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
     let edited_signed_mp4 = out("edited.signed.mp4");
 
     let t = std::time::Instant::now();
-    sign_capture_asset(&cfg.input, &capture_signed_mp4, &capture_assertion_json, &signer, crop_info.as_ref())?;
+    sign_capture_asset(
+        &capture_source,
+        &capture_signed_mp4,
+        &capture_assertion_json,
+        &signer,
+        crop_info.as_ref(),
+    )?;
     sign_edit_asset(
         &edited_mp4,
         &edited_signed_mp4,
