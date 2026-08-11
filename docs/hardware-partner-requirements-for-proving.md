@@ -1,4 +1,4 @@
-# Hardware requirements: capture binding engine and SE-bound signing
+# Hardware requirements: capture binding engine and secure-element signing
 
 ## Goal of this document
 
@@ -226,7 +226,7 @@ sequenceDiagram
 
 The security of Profile B with an assistant does not rest on the assistant: if the assistant returns a commitment to different samples, the opening at the secret point `r` will not match the hardware-accumulated `p(r)` (Schwartz–Zippel), and the SE refuses to sign. If the device computes `com` on the same trusted path as the pixel tap, the opening check is not needed.
 
-### 1.3 Attest handshake (SE reads binding value)
+### 1.3 Attest handshake (secure element reads binding value)
 
 ```mermaid
 sequenceDiagram
@@ -344,7 +344,7 @@ OS               → finish MP4 / lossless archive / sfvr; attach (B, σ)
 
 ---
 
-## 4. How the SE signs
+## 4. How the secure element signs
 
 ### 4.1 Result mailbox
 
