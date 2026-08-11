@@ -40,28 +40,28 @@ Without binding, a signature only proves “some blob was signed by this device 
 
 ```mermaid
 sequenceDiagram
-    participant Cam as Camera pipeline (ISP)
-    participant Tap as Pixel tap (mux)
+    participant Cam as Camera pipeline
+    participant Tap as Pixel tap
     participant Bind as Binding engine
     participant SE as Secure element
     participant OS
 
     OS->>Cam: start capture session
-    Note over Tap: PIPE_ID selects which pixels<br/>(recon YUV, exact frames, …)
-    Note over Bind: SCHEME_ID selects how B is computed<br/>(hash, poly-eval, …)
+    Note over Tap: Tap source fixed at boot (recon YUV or exact frames)
+    Note over Bind: Scheme fixed at boot (hash or poly-eval)
 
     loop during recording
         Cam->>Tap: viewable frames
         Tap->>Bind: locked sample stream
         Bind->>Bind: update private state toward B
-        Note over OS: optional parallel path:<br/>encode → MP4 and/or lossless archive
+        Note over OS: Parallel path encodes or archives for playback, not for binding
     end
 
     OS->>Cam: stop capture
-    Bind->>SE: finalize → B in forge-proof registers
-    SE->>SE: σ = Sign(device_sk, B ‖ …)
-    SE->>OS: mailbox (B, σ)
-    OS->>OS: attach (B, σ) to stored media / metadata
+    Bind->>SE: finalize B in forge-proof registers
+    SE->>SE: Sign device key over B
+    SE->>OS: mailbox returns B and signature
+    OS->>OS: attach to media metadata
 ```
 
 1. **Camera pipeline** produces viewable frames (sensor → ISP → YUV or other sample format).  
@@ -165,7 +165,7 @@ sequenceDiagram
     participant SE as Secure element
     participant OS
 
-    OS->>Enc: start capture session (session id)
+    OS->>Enc: start capture session
     Enc->>Bind: reset hash state
 
     loop each macroblock
@@ -173,18 +173,18 @@ sequenceDiagram
         Enc->>Enc: encode block, emit bitstream chunk
         Enc->>Bind: recon YUV macroblock
         Bind->>Bind: extend hash state
-        Enc->>OS: bitstream chunk (playback mux only)
+        Enc->>OS: bitstream chunk for playback mux only
     end
 
-    Note over Enc,OS: Bitstream may reach the OS while hashing<br/>still runs. That copy is for the MP4, not for computing h1.
+    Note over Enc,OS: Bitstream may reach OS while hashing still runs. That copy is for the MP4, not for computing h1.
 
     OS->>Enc: stop capture
     Enc->>Bind: finalize
-    Bind->>Regs: write h1, STATUS=done
+    Bind->>Regs: write h1, STATUS done
     Regs->>SE: capture finished
-    SE->>Regs: read h1 (+ session / pipe / format ids)
-    SE->>SE: σ = Sign(device_sk, …)
-    SE->>OS: mailbox (h1, σ, …)
+    SE->>Regs: read h1 and session ids
+    SE->>SE: Sign device key over h1
+    SE->>OS: mailbox returns h1 and signature
     OS->>OS: finish MP4, attach metadata
 ```
 
@@ -199,28 +199,28 @@ sequenceDiagram
     participant Regs as BIND regs
     participant SE as Secure element
     participant OS
-    participant Asst as Assistant (untrusted)
+    participant Asst as Assistant
 
-    SE->>Bind: secret point r (from TRNG, never visible to OS)
+    SE->>Bind: secret point r from TRNG, never visible to OS
 
-    loop each frame / sample block
+    loop each frame or sample block
         ISP->>Bind: exact frame samples
-        Bind->>Bind: accumulate p(r) (streaming evaluation)
-        Note over OS: OS stores lossless samples / sfvr for later proving
+        Bind->>Bind: accumulate p(r) streaming evaluation
+        Note over OS: OS stores lossless samples or sfvr for later proving
     end
 
-    Bind->>Regs: write p(r) (private), STATUS=done
+    Bind->>Regs: write p(r) private, STATUS done
     OS->>Asst: send video samples
-    Asst->>OS: com + opening proof at point r*
-    Note over Asst: r is revealed to the assistant only per protocol,<br/>after the video is fixed
-    OS->>SE: forward com + opening proof (attest request)
-    SE->>Regs: read p(r), r (private path)
-    SE->>SE: verify opening: com opens to p(r) at r
+    Asst->>OS: com plus opening proof
+    Note over Asst: r is revealed to the assistant only after the video is fixed
+    OS->>SE: forward com and opening proof
+    SE->>Regs: read p(r) and r on private path
+    SE->>SE: verify opening matches p(r) at r
     alt opening valid
-        SE->>SE: σ = Sign(device_sk, com ‖ session_id ‖ …)
-        SE->>OS: mailbox (com, σ, …)
+        SE->>SE: Sign device key over com
+        SE->>OS: mailbox returns com and signature
     else invalid
-        SE->>OS: mailbox STATUS=fail (no signature)
+        SE->>OS: mailbox STATUS fail, no signature
     end
 ```
 
@@ -235,15 +235,15 @@ sequenceDiagram
     participant SE as Secure element
     participant OS
 
-    Note over Bind,Regs: Samples streamed during the capture session;<br/>OS never supplies binding bytes.
+    Note over Bind,Regs: Samples streamed during capture. OS never supplies binding bytes.
 
-    Bind->>Regs: BIND_VALUE, STATUS=done
+    Bind->>Regs: BIND_VALUE, STATUS done
     Regs-->>SE: hardware capture-finished signal
-    SE->>Regs: private read: BIND_VALUE, SESSION_ID, PIPE_ID, FMT_ID
+    SE->>Regs: private read of BIND_VALUE and ids
     Note over SE: No OS API accepts a binding value from the OS
-    SE->>SE: σ = Sign(sk, B ‖ session_id ‖ …)
-    SE->>OS: mailbox: B, SIG, SESSION_ID, FMT_ID, STATUS=ok
-    OS->>OS: poll mailbox; attach (B, σ) to file / C2PA
+    SE->>SE: Sign device key over B
+    SE->>OS: mailbox returns B and signature
+    OS->>OS: poll mailbox and attach to file or C2PA
 ```
 
 ---
