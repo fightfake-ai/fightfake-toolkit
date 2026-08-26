@@ -38,6 +38,7 @@
 //! the assertion, so a later full re-prove can replace it without breaking the
 //! C2PA manifest chain.
 
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
@@ -197,6 +198,11 @@ pub enum Gadget {
     },
 }
 
+fn emit_progress(value: serde_json::Value) {
+    println!("PROGRESS {value}");
+    let _ = io::stdout().flush();
+}
+
 impl Gadget {
     pub fn id(&self) -> &'static str {
         match self {
@@ -313,17 +319,25 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
     let mbs_per_frame = (width / 16) * (height / 16);
     let total_mbs = mbs_per_frame * num_frames;
     if total_mbs > 0 && blocks_per_step > 0 && total_mbs % blocks_per_step != 0 {
-        let suggested = if mbs_per_frame > 0 && total_mbs % mbs_per_frame == 0 {
-            mbs_per_frame
-        } else {
-            total_mbs
-        };
+        let suggested = (1..=blocks_per_step.min(total_mbs))
+            .rev()
+            .find(|c| total_mbs % *c == 0)
+            .unwrap_or(total_mbs);
         println!(
             "[workflow] adjusting --blocks-per-step {blocks_per_step} → {suggested} \
              ({total_mbs} macroblocks total, {mbs_per_frame}/frame)"
         );
         blocks_per_step = suggested;
     }
+    emit_progress(serde_json::json!({
+        "phase": "tiled",
+        "width": width,
+        "height": height,
+        "frames": num_frames,
+        "mbs": total_mbs,
+        "bps": blocks_per_step,
+        "steps": if blocks_per_step > 0 { total_mbs / blocks_per_step } else { 0 },
+    }));
 
     // "Touched time window": only meaningful for `redact`, since every other
     // gadget edits every pixel of every frame anyway. Resolved once, up
@@ -380,6 +394,7 @@ pub fn run_prove_edit(cfg: &ProveEditConfig) -> Result<ProveEditOutput> {
     println!("[workflow] h1 = {h1_hex}");
     println!("[workflow] h2 = {h2_hex}");
     println!("[workflow] edit + hash ({hash_s:.2}s)");
+    emit_progress(serde_json::json!({ "phase": "hashed", "h1": h1_hex, "h2": h2_hex }));
 
     // 5. Generate ZK proof (real or stub).
     let t = std::time::Instant::now();
@@ -1210,6 +1225,12 @@ macro_rules! run_nova_groth16 {
         let edit_configs_0: Vec<_> = $edit_configs(0, blocks_per_step);
 
         println!("[prover] Nova preprocess ({} MBs, {blocks_per_step} per step)", blocks.len());
+        emit_progress(serde_json::json!({
+            "phase": "preprocess",
+            "mbs": blocks.len(),
+            "bps": blocks_per_step,
+            "steps": num_steps,
+        }));
         let (pp, vp) = NOVA::preprocess(
             &poseidon_config,
             &f_circuit,
@@ -1221,7 +1242,9 @@ macro_rules! run_nova_groth16 {
         )
         .context("Nova preprocess failed")?;
 
-        // Groth16 circuit setup (dummy witnesses).
+        // Groth16 circuit setup (dummy witnesses). Often a couple of minutes.
+        println!("[prover] Groth16 setup");
+        emit_progress(serde_json::json!({ "phase": "groth16_setup" }));
         let pk = Groth16::<Bn254>::generate_random_parameters_with_reduction(
             DeciderEthCircuit::<Projective, GVar, Projective2, GVar2> {
                 _gc1: PhantomData,
@@ -1259,10 +1282,17 @@ macro_rules! run_nova_groth16 {
 
         // Nova IVC.
         println!("[prover] Nova IVC ({num_steps} steps)");
+        emit_progress(serde_json::json!({ "phase": "nova", "step": 0, "steps": num_steps }));
         let mut fs = NOVA::init(&params, f_circuit, initial_state.clone())
             .context("Nova init failed")?;
 
         for i in 0..num_steps {
+            let step_t = std::time::Instant::now();
+            emit_progress(serde_json::json!({
+                "phase": "nova_step",
+                "step": i + 1,
+                "steps": num_steps,
+            }));
             let cfgs: Vec<_> = $edit_configs(i, blocks_per_step);
             fs.prove_step(
                 &params,
@@ -1272,6 +1302,13 @@ macro_rules! run_nova_groth16 {
                 },
             )
             .with_context(|| format!("Nova prove_step {i} failed"))?;
+            println!(
+                "[prover] Nova step {}/{} ({:.2}s)",
+                i + 1,
+                num_steps,
+                step_t.elapsed().as_secs_f64()
+            );
+            let _ = io::stdout().flush();
         }
 
         let last_state = fs.state();
@@ -1301,6 +1338,7 @@ macro_rules! run_nova_groth16 {
             .context("DeciderEthCircuit missing u_i witness")?;
 
         println!("[prover] Groth16 decider prove");
+        emit_progress(serde_json::json!({ "phase": "groth16_prove" }));
         let (groth_proof, cm_t, r) =
             Decider::prove(decider_pp, rng, circuit).context("Groth16 prove failed")?;
 

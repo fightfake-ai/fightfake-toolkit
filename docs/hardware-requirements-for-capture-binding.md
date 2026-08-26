@@ -412,3 +412,11 @@ A verifier who trusts the device certificate and the manufacturing/firmware proc
 > **Profile B:** `com` is a polynomial commitment consistent with the camera’s pixel stream for this session (via on-device commitment, or via an opening check against hardware `p(r)` when an assistant is used), and `σ` was produced by the SE over that `com`. An assistant that computed `com` did not need to be trusted.
 
 Edit proving runs later off-device. Profile A: decode the published MP4 with a compatible decoder, tile to macroblocks, prove edits against `h1`. Profile B: prove edits (matrix-multiplication form, sfvr deltas where applicable) against the signed `com` over the retained exact samples.
+
+---
+
+## Related docs
+
+- [capture-binding-prototype-guide.md](./capture-binding-prototype-guide.md) — what to buy, what to build for a first FPGA or eval-kit prototype  
+- [level1-pi-demonstrator.md](./level1-pi-demonstrator.md) — software/TEE path on Raspberry Pi  
+- Public summary: [fightfake.ai/hardware](https://fightfake.ai/hardware)
